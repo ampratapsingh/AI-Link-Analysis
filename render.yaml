@@ -21,4 +21,6 @@ services:
       - key: ANTHROPIC_API_KEY
         sync: false
       - key: SEARCH_PROVIDER
-        value: "none"
+        value: tavily
+      - key: SEARCH_API_KEY
+        sync: false

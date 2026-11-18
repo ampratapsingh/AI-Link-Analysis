@@ -2,6 +2,8 @@
 
 Submit a public website URL to FastAPI to extract business evidence and generate a brand profile, competitor analysis, five search queries, SEO recommendations, services, and target audiences.
 
+[Live demo](https://ai-link-analysis-k6ny.onrender.com/docs) · [API endpoint](https://ai-link-analysis-k6ny.onrender.com/link-analysis) · [Health check](https://ai-link-analysis-k6ny.onrender.com/health) · [Sanitized production logs](docs/DEMO_VERIFICATION.md)
+
 ## Local development
 
 Use Python 3.11 or newer.
@@ -242,7 +244,13 @@ A service with a missing required citation or a citation that fails verification
 
 ### Model comparison and estimated cost
 
-The [provider comparison](docs/LLM_COMPARISON.md) compares the default Claude Haiku 5.5 with OpenAI GPT-5.4 mini and Gemini 3.5 Flash-Lite. At 6,000 input and 1,500 output tokens, estimated uncached generation costs are $0.00135 for Claude, $0.01125 for OpenAI, and $0.00555 for Gemini. Tavily credits are separate. The report includes volume estimates, official sources, and a repeatable procedure for measuring accuracy and response time.
+| Model | Input / output per 1M tokens | Context or input limit | Structured JSON | Latency and quality evidence |
+| --- | ---: | ---: | --- | --- |
+| Claude Haiku 5.5 | $0.10 / $0.50 in the standard short-prompt tier | 1M context | JSON Schema with prompt-only JSON fallback and local Pydantic validation | The recorded Shopify demo completed in 15.1 seconds end to end. Workload accuracy has not been benchmarked. |
+| OpenAI GPT-5.4 mini | $0.75 / $4.50 | 400,000 context | Responses API Structured Outputs | Vendor positions it for efficient, high-volume work. Speed and accuracy for this task are unmeasured. |
+| Gemini 3.5 Flash-Lite | $0.30 / $2.50 | 1,048,576 input | Schema-constrained JSON | Vendor positions it for low-latency extraction. Speed and accuracy for this task are unmeasured. |
+
+**Recommendation:** Use Claude Haiku 5.5 for its estimated cost and the demonstrated five-section workflow. OpenAI GPT-5.4 mini is the configured alternative. At 6,000 input and 1,500 output tokens, estimated uncached generation costs are $0.00135 for Claude, $0.01125 for OpenAI, and $0.00555 for Gemini. Tavily credits are separate. The [full comparison](docs/LLM_COMPARISON.md) includes official sources, usage assumptions, and a repeatable benchmark procedure.
 
 ## Optional competitor research
 
@@ -288,8 +296,8 @@ git push -u origin main
 ### Create the web service
 
 1. In the Render dashboard, choose **New → Blueprint**. Connect the GitHub repository and choose the branch that contains the root `render.yaml`.
-2. Review the single Free web service. Provide `ANTHROPIC_API_KEY` in the Blueprint secret prompt, then deploy after approval. For an existing service, add the key under **Environment** in the Render dashboard because `sync: false` prompts only on initial Blueprint creation. The Blueprint disables automatic deploys from future commits. [Render Blueprint guide](https://render.com/docs/infrastructure-as-code)
-3. Wait for the build and `/health` check to pass. Copy the actual HTTPS `onrender.com` URL from the service dashboard.
+2. Review the single Free web service. Provide `ANTHROPIC_API_KEY` and `SEARCH_API_KEY` in the Blueprint secret prompts. For an existing service, enter missing keys directly under **Environment** because `sync: false` prompts only on initial Blueprint creation. Use **Save only** to stage environment changes for the next deploy. The service disables commit-triggered builds. Review Blueprint changes separately before syncing. [Render Blueprint guide](https://render.com/docs/infrastructure-as-code)
+3. Wait for the build and `/health` check to pass. Use the service's assigned HTTPS URL.
 4. For subsequent changes, choose **Manual Deploy** after reviewing the commit and rerunning tests.
 
 | Render setting | Value |
@@ -310,7 +318,7 @@ git push -u origin main
 | `HOST`, `PORT`, `PYTHON_VERSION` | The Blueprint sets `HOST` and `PYTHON_VERSION`. Leave `PORT` to Render. |
 | `LLM_PROVIDER`, `ANTHROPIC_MODEL` | The Blueprint sets `anthropic` and `claude-haiku-5-5`. |
 | `OPENAI_API_KEY`, `OPENAI_MODEL` | Optional. Select `LLM_PROVIDER=openai` to use OpenAI and add its key as a Render secret. |
-| `SEARCH_PROVIDER`, `SEARCH_API_KEY` | The Blueprint sets `SEARCH_PROVIDER=none`. To enable optional research, set `SEARCH_PROVIDER=tavily` and add the key in Render's environment dashboard. If you sync the Blueprint again, update its explicit `SEARCH_PROVIDER` value to preserve that choice. |
+| `SEARCH_PROVIDER`, `SEARCH_API_KEY` | The Blueprint selects `tavily`. Add the Tavily key as `SEARCH_API_KEY` in Render. Set `SEARCH_PROVIDER=none` to opt out. A later Blueprint sync reapplies the provider declared in `render.yaml`. |
 | `ANALYSIS_REQUESTS_PER_HOUR`, `ANALYSIS_MAX_IN_FLIGHT` | Defaults are 20 admitted analysis requests per rolling hour and two in flight, shared per process. |
 | `ANALYSIS_MAX_BODY_BYTES`, `ANALYSIS_BODY_TIMEOUT_SECONDS` | Defaults are 32 KiB and five seconds for reading the request body. |
 
@@ -318,17 +326,17 @@ Other fetch and model limits are listed in [`.env.example`](.env.example). Missi
 
 ### Verify the deployed service
 
-Replace the placeholder with the URL from Render. These requests use no model or search credits.
+Use the public demo URL below for the assessment service, or substitute your own service URL. These checks use no model or search credits.
 
 ```bash
-base_url='https://YOUR-SERVICE.onrender.com'
+base_url='https://ai-link-analysis-k6ny.onrender.com'
 curl -fsS "$base_url/health"
 curl -fsS -o /dev/null -w '%{http_code}\n' "$base_url/docs"
 curl -fsS -o /dev/null -w '%{http_code}\n' "$base_url/openapi.json"
 curl -sS -i "$base_url/link-analysis" -H 'Content-Type: application/json' -d '{"url":"example.com"}'
 ```
 
-Expect `200` for the three GETs and `422` for invalid input. `/health` checks the running process. To verify provider access after approval, submit one public business website via Swagger and check the five sections in the `200` response. This request can consume provider credits. For the assessment, share the HTTPS base URL and the `/docs` URL after these checks pass.
+Expect `200` for the three GETs and `422` for invalid input. `/health` checks the running process. To verify the LLM and Tavily together, submit one public business website in [Swagger](https://ai-link-analysis-k6ny.onrender.com/docs). Check the five sections, `research_status`, and any returned competitor citations. With Tavily configured, that request can use up to two basic-search credits and one completed model generation in the normal path.
 
 ### Public service limits
 
