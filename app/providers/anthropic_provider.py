@@ -51,8 +51,11 @@ def _build_analysis_schema() -> dict[str, object]:
 
 _ANALYSIS_SCHEMA = _build_analysis_schema()
 _JSON_FALLBACK_INSTRUCTIONS = (
-    "\n\nReturn exactly one JSON object matching this schema. "
-    "Do not include Markdown fences, comments, or surrounding prose.\n"
+    "\n\nReturn exactly one compact JSON object matching this schema. "
+    "Do not include Markdown fences, comments, or surrounding prose. "
+    "Use short phrases or single sentences for generated text. Keep open-ended recommendation "
+    "and audience lists to at most three distinct entries each. Keep all required fields and "
+    "exactly five search queries. Preserve required verbatim evidence excerpts.\n"
     + json.dumps(_ANALYSIS_SCHEMA, separators=(",", ":"))
 )
 _SCHEMA_COMPLEXITY_ERROR = "Structured output schema is too complex to compile."
@@ -123,6 +126,8 @@ class AnthropicAnalysisProvider:
     async def generate(self, *, system_prompt: str, content: str) -> GeneratedAnalysis:
         started = perf_counter()
         input_tokens = output_tokens = None
+        output_mode = "structured"
+        max_output_tokens = self._settings.llm_max_output_tokens
         try:
             async with asyncio.timeout(self._settings.llm_timeout_seconds):
                 async with AsyncAnthropic(
@@ -133,7 +138,7 @@ class AnthropicAnalysisProvider:
                     request = {
                         "model": self._model,
                         "messages": [{"role": "user", "content": content}],
-                        "max_tokens": self._settings.llm_max_output_tokens,
+                        "max_tokens": max_output_tokens,
                         "thinking": {"type": "disabled"} if self._model == "claude-haiku-5-5" else omit,
                     }
                     try:
@@ -150,6 +155,7 @@ class AnthropicAnalysisProvider:
                             raise
                         _log_http_error(exc, error_type, summary)
                         logger.warning("Anthropic rejected the schema. Trying prompt-only JSON once.")
+                        output_mode = "prompt_json"
                         reply = await client.with_options(max_retries=0).messages.create(
                             **request,
                             system=system_prompt + _JSON_FALLBACK_INSTRUCTIONS,
@@ -197,8 +203,10 @@ class AnthropicAnalysisProvider:
             raise LLMOutputError("invalid_output", "Claude returned an invalid structured analysis.") from None
         finally:
             logger.info(
-                "Claude analysis duration_ms=%d input_tokens=%s output_tokens=%s",
+                "Claude analysis duration_ms=%d input_tokens=%s output_tokens=%s output_mode=%s max_output_tokens=%d",
                 (perf_counter() - started) * 1000,
                 input_tokens,
                 output_tokens,
+                output_mode,
+                max_output_tokens,
             )

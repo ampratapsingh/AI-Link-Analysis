@@ -231,10 +231,12 @@ The extractor reads static HTML and supports identity and single-member gzip enc
 | `OPENAI_API_KEY` | Unset. Required only with `LLM_PROVIDER=openai`. |
 | `OPENAI_MODEL` | `gpt-5.4-mini` when OpenAI is selected. |
 | `LLM_TIMEOUT_SECONDS` | 30 seconds for the provider call, including at most one SDK retry |
-| `LLM_MAX_OUTPUT_TOKENS` | 3,000 |
+| `LLM_MAX_OUTPUT_TOKENS` | 5,000 for Claude, 3,000 for OpenAI. An explicit environment value overrides the default. |
 | `LLM_MAX_CONTENT_CHARS` | 12,000 characters of prepared website JSON |
 
 Haiku 5.5 runs with thinking disabled to leave the generation budget for the five-section JSON response. To use OpenAI, explicitly set `LLM_PROVIDER=openai` and provide `OPENAI_API_KEY`. The app uses the selected provider without automatic fallback. Logs include stage transitions, failure codes, duration, and available token counts. Keep SDK and HTTP client debug logging disabled when handling website data.
+
+If Claude stops at its output token limit, the API returns `llm_output_truncated`. The adapter rejects the incomplete JSON and does not regenerate it, avoiding a second generation charge. The Claude log line shows the active token limit and whether the response came from native structured output or prompt-only JSON.
 
 ### Model comparison and estimated cost
 

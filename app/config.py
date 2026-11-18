@@ -15,7 +15,10 @@ class Settings(BaseModel):
     openai_api_key: SecretStr | None = None
     openai_model: str = "gpt-5.4-mini"
     llm_timeout_seconds: float = Field(default=30.0, gt=0, allow_inf_nan=False)
-    llm_max_output_tokens: int = Field(default=3000, ge=16)
+    llm_max_output_tokens: int = Field(
+        default_factory=lambda values: 5000 if values["llm_provider"].strip().casefold() == "anthropic" else 3000,
+        ge=16,
+    )
     llm_max_content_chars: int = Field(default=12000, ge=256)
     search_provider: str = "tavily"
     search_api_key: SecretStr | None = None

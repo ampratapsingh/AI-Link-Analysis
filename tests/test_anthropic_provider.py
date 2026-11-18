@@ -117,8 +117,9 @@ async def test_messages_uses_structured_output_and_logs_only_metrics(
 
 
 async def test_schema_rejection_falls_back_to_locally_validated_json(
-    provider, mock_anthropic, anthropic_response, analysis, caplog
+    mock_anthropic, anthropic_response, analysis, caplog
 ):
+    provider = AnthropicAnalysisProvider(Settings(anthropic_api_key="fixture-key"))
     calls = []
     system_prompt = "Private system instructions"
     content = "Private website evidence"
@@ -140,7 +141,8 @@ async def test_schema_rejection_falls_back_to_locally_validated_json(
         assert "tools" not in body
         instructions, _, schema = body["system"].rpartition("\n")
         assert instructions.startswith(system_prompt)
-        assert "Return exactly one JSON object" in instructions
+        assert "Return exactly one compact JSON object" in instructions
+        assert "Preserve required verbatim evidence excerpts." in instructions
         assert json.loads(schema) == _ANALYSIS_SCHEMA
         assert content not in body["system"]
         for key in ("model", "max_tokens", "thinking", "messages"):
@@ -152,15 +154,23 @@ async def test_schema_rejection_falls_back_to_locally_validated_json(
 
     assert result == GeneratedAnalysis.model_validate(analysis)
     assert len(calls) == 2
+    assert calls[1]["max_tokens"] == 5000
     assert "status=400 error_type=invalid_request_error" in caplog.text
     assert "Trying prompt-only JSON once" in caplog.text
     for sensitive in ("fixture-key", system_prompt, content):
         assert sensitive not in caplog.text
 
 
-@pytest.mark.parametrize("outcome", ["malformed_json", "overloaded"])
+@pytest.mark.parametrize(
+    ("outcome", "expected_type", "code"),
+    [
+        ("malformed_json", LLMOutputError, "invalid_output"),
+        ("truncated", LLMOutputError, "output_truncated"),
+        ("overloaded", LLMProviderError, "provider_error"),
+    ],
+)
 async def test_failed_fallback_never_makes_another_request(
-    provider, mock_anthropic, anthropic_response, outcome
+    provider, mock_anthropic, anthropic_response, outcome, expected_type, code, caplog
 ):
     calls = []
 
@@ -172,6 +182,8 @@ async def test_failed_fallback_never_makes_another_request(
             })
         if outcome == "malformed_json":
             return anthropic_response('{"brand":{}}')
+        if outcome == "truncated":
+            return anthropic_response('{"brand":', stop_reason="max_tokens")
         return httpx.Response(
             529,
             headers={"retry-after-ms": "1"},
@@ -179,12 +191,12 @@ async def test_failed_fallback_never_makes_another_request(
         )
 
     mock_anthropic(handler)
-    expected_type = LLMOutputError if outcome == "malformed_json" else LLMProviderError
-    with pytest.raises(expected_type) as error:
+    with caplog.at_level(logging.INFO), pytest.raises(expected_type) as error:
         await provider.generate(system_prompt="Instructions", content="Evidence")
 
-    assert error.value.code == ("invalid_output" if outcome == "malformed_json" else "provider_error")
+    assert error.value.code == code
     assert len(calls) == 2
+    assert "output_mode=prompt_json max_output_tokens=1250" in caplog.text
 
 
 @pytest.mark.parametrize("key", [None, "", " "])
@@ -202,6 +214,14 @@ async def test_environment_config_loads_and_redacts_anthropic_credentials(monkey
     settings = load_settings()
     assert settings.anthropic_api_key is not None and "fixture-key" not in repr(settings)
     assert isinstance(get_analysis_provider(settings), AnthropicAnalysisProvider)
+
+
+async def test_output_token_default_preserves_openai_budget_and_explicit_override(monkeypatch):
+    assert Settings(llm_provider="openai").llm_max_output_tokens == 3000
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+    monkeypatch.setenv("LLM_MAX_OUTPUT_TOKENS", "3500")
+    assert load_settings().llm_max_output_tokens == 3500
 
 
 async def test_timeout_covers_entire_anthropic_request(mock_anthropic):
