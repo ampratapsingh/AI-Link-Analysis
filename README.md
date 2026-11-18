@@ -219,7 +219,9 @@ IPv6 destinations must also belong to an IANA allocation to a regional internet 
 
 Each connection uses a validated numeric IP with environment proxies disabled. The HTTP Host header and TLS hostname come from the original URL for that hop. Redirects are followed manually, with DNS and address validation repeated even when the hostname stays the same. Connections close between hops. The final HTML is streamed with limits on both downloaded and decoded bytes. Tests cover destination pinning through simulated sockets and TLS, mixed DNS answers, a hostname changing to a private address between redirects, and blocked URL representations.
 
-The extractor reads static HTML and supports identity and single-member gzip encoding. JavaScript and bot challenge detection is heuristic. Empty pages and detected challenges return an unsuccessful result with warnings. DNS, blocked destinations, HTTP failures, timeouts, and unsupported or oversized responses raise typed errors.
+The extractor reads static HTML and supports identity and single-member gzip encoding. It checks for common bot challenges, interstitials, access-denied messages, and JavaScript shells. Detection is heuristic. Detected gates, empty pages, and explicitly partial HTML return an error with an explanation. DNS, blocked destinations, HTTP failures, timeouts, and unsupported or oversized responses raise typed errors.
+
+For readable pages with very little business text, the API returns a limited report with the same five sections. The brand summary identifies the limitation and quotes the observed title if present. Products, services, competitors, and audiences remain unverified. Search queries and general SEO ideas are labeled as suggestions. The API skips both the LLM and external competitor research for these pages.
 
 ## LLM analysis
 

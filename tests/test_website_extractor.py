@@ -59,7 +59,7 @@ async def test_extracts_metadata_and_preserves_business_content():
                 <p>We monitor business networks around the clock.</p>
                 <a href="/services/managed-it">Managed IT plans</a>
                 <a href="mailto:hello@example.com">Email us</a>
-                <img alt="Network support team">
+                <img alt="Network support team"><div class="h-captcha"></div>
               </section>
               <div><h2>Cloud migration</h2><p>We manage business email migrations.</p></div>
               <div hidden>Hidden noise</div>
@@ -77,7 +77,7 @@ async def test_extracts_metadata_and_preserves_business_content():
 
     result = await extractor(handler, website_user_agent="AssessmentBot/1.0").extract(URL)
 
-    assert result.success and result.warnings == []
+    assert result.success and not result.is_sparse and result.warnings == []
     assert result.requested_url == result.final_url == URL
     assert result.title == "Northwind Services"
     assert result.meta_description == "Managed IT for small businesses"
@@ -101,7 +101,24 @@ async def test_missing_title_and_description_are_warnings():
     assert result.success
     assert result.title is None
     assert result.meta_description is None
-    assert result.warnings == ["The page has no title.", "The page has no meta description."]
+    assert result.is_sparse
+    assert result.warnings[:2] == ["The page has no title.", "The page has no meta description."]
+    assert "too little readable business content" in result.warnings[-1]
+
+
+async def test_navigation_and_metadata_do_not_make_a_sparse_page_content_rich():
+    html = b"""
+        <head><title>Example storefront</title>
+        <meta name="description" content="A storefront with an extended description in metadata."></head>
+        <main><h1>Example storefront</h1><p>Welcome.</p>
+        <div><a href="/catalog">Browse all departments and discover products from our online catalog</a>
+        <a href="/account">Sign in to your account and view order history and billing settings</a>
+        <a href="/help">Get help with your orders returns exchanges and customer service</a></div></main>
+    """
+    result = await extractor(lambda _: html_response(html)).extract(URL)
+
+    assert result.success and result.is_sparse
+    assert "too little readable business content" in result.warnings[-1]
 
 
 @pytest.mark.parametrize(
@@ -113,18 +130,27 @@ async def test_missing_title_and_description_are_warnings():
         (b"<noscript>Please enable JavaScript to continue.</noscript>", "require JavaScript"),
         (b"<title>Just a moment...</title><p>Checking your browser.</p>", "bot challenge"),
         (b'<div class="h-captcha"></div><p>Verify to continue.</p>', "CAPTCHA"),
+        (b"<title>Example Store</title><p>Enter the characters you see below.</p>", "bot challenge"),
+        (b"<title>Example Store</title><p>Click the button below to continue shopping.</p>", "interstitial"),
+        (b"<title>Before you continue</title><p>Select your privacy preferences.</p>", "interstitial"),
+        (b"<title>ACCESS DENIED | Edge</title><p>This page is unavailable.</p>", "access-denied"),
+        (b"<title>Example Store</title><p>You don't have permission to access this page.</p>", "access-denied"),
     ],
 )
 async def test_unusable_pages_return_clear_warnings(html, warning):
     result = await extractor(lambda _: html_response(html)).extract(URL)
 
     assert not result.success
+    assert not result.is_sparse
     assert any(warning in message for message in result.warnings)
 
 
 @pytest.mark.parametrize(
     ("status", "code"),
-    [(403, "access_blocked"), (404, "page_not_found"), (429, "rate_limited"), (500, "website_http_error")],
+    [
+        (206, "unusable_website"), (403, "access_blocked"), (404, "page_not_found"),
+        (429, "rate_limited"), (500, "website_http_error"),
+    ],
 )
 async def test_website_http_errors(status, code):
     service = extractor(lambda _: html_response(b"upstream body", status=status))

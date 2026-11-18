@@ -336,12 +336,59 @@ async def test_website_unavailable(client, mock_website, website_status, code):
         (b"", "no readable HTML content"),
         (b"<title>Just a moment...</title>", "bot challenge"),
         (b'<div id="root"></div><script src="/app.js"></script>', "require JavaScript"),
+        (b"<title>Amazon.com</title><p>Enter the characters you see below.</p>", "bot challenge"),
+        (b"<title>Amazon.com</title><p>Click the button below to continue shopping.</p>", "interstitial"),
+        (b"<title>Example store</title><h1>Access Denied</h1><p>Private reference ID</p>", "access-denied"),
     ],
 )
-async def test_unusable_extraction_stops_before_llm(client, mock_website, html, message):
+async def test_unusable_extraction_stops_before_llm(client, mock_website, monkeypatch, html, message):
+    def unexpected_provider(*_args):
+        pytest.fail("An unusable page started analysis")
+
+    monkeypatch.setattr(analysis_service, "get_analysis_provider", unexpected_provider)
+    monkeypatch.setattr(analysis_service, "discover_competitors", unexpected_provider)
     mock_website(lambda _: website_response(html))
     response = await client.post("/link-analysis", json={"url": URL})
     assert message in assert_error(response, 502, "unusable_website").detail
+    assert "Private reference ID" not in response.text
+
+
+@pytest.mark.parametrize("host", ["amazon.com", "minimal-store.example"])
+async def test_sparse_landing_returns_limited_analysis_without_providers(
+    client, mock_website, monkeypatch, host
+):
+    def unexpected_provider(*_args):
+        pytest.fail("A sparse page invoked a provider")
+
+    monkeypatch.setattr(analysis_service, "get_analysis_provider", unexpected_provider)
+    monkeypatch.setattr(analysis_service, "discover_competitors", unexpected_provider)
+    html = (
+        f"<title>{host}</title>"
+        '<meta name="description" content="Free next-day delivery and benefits for paid members.">'
+        "<main><p>Welcome.</p></main>"
+    ).encode()
+    mock_website(lambda _: website_response(html))
+
+    response = await client.post("/link-analysis", json={"url": f"https://{host}/"})
+
+    assert response.status_code == 200
+    assert set(response.json()) == {"success", "website", "brand", "analysis"}
+    result = LinkAnalysisResponse.model_validate(response.json())
+    assert result.success and str(result.website) == f"https://{host}/"
+    assert result.brand.name is None and result.brand.category is None
+    assert "Limited evidence" in result.brand.summary
+    assert f'Observed page title: "{host}"' in result.brand.summary
+    assert result.analysis.competitor_analysis.main_products_and_services == []
+    assert result.analysis.competitor_analysis.competitors == []
+    assert result.analysis.top_services == []
+    assert result.analysis.target_audience.primary_audience == []
+    queries = result.analysis.target_search_queries
+    assert len({item.query for item in queries}) == 5
+    assert all(item.intent.startswith("Suggested") and item.target_audience == "Unverified" for item in queries)
+    seo = result.analysis.seo_improvements
+    assert not seo.primary_keyword and not seo.recommended_title and not seo.meta_description
+    assert seo.supporting_content and all(item.startswith("Suggestion:") for item in seo.supporting_content)
+    assert "next-day delivery" not in response.text and "paid members" not in response.text
 
 
 async def test_unsupported_website_content_type(client, mock_website):

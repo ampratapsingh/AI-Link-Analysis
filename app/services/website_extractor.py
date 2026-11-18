@@ -41,6 +41,7 @@ class ExtractionResult:
     image_alt_text: list[str]
     warnings: list[str]
     success: bool
+    is_sparse: bool = False
 
 
 _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
@@ -61,10 +62,33 @@ _BLOCK_TAGS = {
     "address", "article", "blockquote", "br", "dd", "div", "dl", "dt", "figcaption",
     "h1", "h2", "h3", "h4", "h5", "h6", "header", "li", "main", "p", "section", "td",
 }
-_CHALLENGE_TITLES = {
-    "access denied", "attention required! | cloudflare", "just a moment...",
-    "request blocked", "verify you are human",
-}
+_NON_PROSE_TAGS = {"a", "button", "h1", "h2", "h3", "h4", "h5", "h6"}
+_DENIED_LABEL = re.compile(
+    r"^(?:(?:403\s+)?forbidden|access (?:denied|restricted)|request blocked)[.!]?(?:$|\s+[|–—-]\s+)",
+    re.I,
+)
+_DENIED_TEXT = re.compile(
+    r"\b(?:you (?:do not|don't) have permission|you are not authori[sz]ed) to access\b"
+    r"|\b(?:your|this) request (?:has been|was) blocked\b",
+    re.I,
+)
+_CHALLENGE_LABEL = re.compile(
+    r"^(?:just a moment[.!…]*$|attention required!\s*\||robot check\b|human verification\b"
+    r"|verify (?:that )?you are human\b|checking your browser\b)",
+    re.I,
+)
+_CHALLENGE_TEXT = re.compile(
+    r"\b(?:verify (?:that )?you are human|confirm (?:that )?you(?:'re| are) not a robot"
+    r"|enter the characters you see below|checking your browser before accessing)\b",
+    re.I,
+)
+_INTERSTITIAL_TEXT = re.compile(
+    r"\b(?:click|tap|press|select) (?:the )?(?:button|link)(?: below)? to (?:continue|proceed)\b"
+    r"|\b(?:sign in|log in) to (?:continue|access this (?:site|page))\b",
+    re.I,
+)
+_INTERSTITIAL_LABEL = re.compile(r"^(?:before you continue|consent required)[.!]?$", re.I)
+_WORD = re.compile(r"[^\W_]+")
 
 
 class WebsiteExtractor:
@@ -141,6 +165,8 @@ class WebsiteExtractor:
 
 
 def _check_response(response: httpx.Response) -> None:
+    if response.status_code == 206:
+        raise WebsiteFetchError("unusable_website", "The website returned only partial HTML.", status_code=206)
     if not response.is_success:
         code, message = _SITE_ERRORS.get(
             response.status_code,
@@ -217,7 +243,7 @@ def _strip_noise(body: Tag) -> None:
             tag.decompose()
 
 
-def _text_blocks(body: Tag) -> list[str]:
+def _text_blocks(body: Tag, *, prose_only: bool = False) -> list[str]:
     blocks: list[str] = []
     parts: list[str] = []
     stack = [(None, iter(body.children))]
@@ -229,6 +255,10 @@ def _text_blocks(body: Tag) -> list[str]:
             stack.pop()
             boundary = closing_tag in _BLOCK_TAGS
         elif isinstance(node, Tag):
+            if prose_only and node.name in _NON_PROSE_TAGS:
+                # Preserve word boundaries around skipped inline links.
+                parts.append(" ")
+                continue
             stack.append((node.name, iter(node.children)))
             boundary = node.name in _BLOCK_TAGS
         else:
@@ -258,6 +288,31 @@ def _extract_links(body: Tag, final_url: httpx.URL) -> list[PageLink]:
     return list(links)
 
 
+def _page_failure(
+    title: str | None, h1: list[str], content: str, challenge_hint: bool, javascript_hint: bool
+) -> str | None:
+    labels = [title or "", *h1[:1]]
+    # Body-only signals are limited to short pages so ordinary product or help copy can mention them.
+    short_page = len(content) < 1200
+    if any(_DENIED_LABEL.match(label) for label in labels) or (short_page and _DENIED_TEXT.search(content)):
+        return "The website returned an access-denied or restricted page instead of its content."
+    if (
+        any(_CHALLENGE_LABEL.match(label) for label in labels)
+        or (short_page and _CHALLENGE_TEXT.search(content))
+        or challenge_hint
+    ):
+        return "The website returned a bot challenge or CAPTCHA instead of its content."
+    if short_page and (
+        any(_INTERSTITIAL_LABEL.match(label) for label in labels) or _INTERSTITIAL_TEXT.search(content)
+    ):
+        return "The website returned an interstitial instead of its business content."
+    if len(content) < 80 and javascript_hint:
+        return "The page appears to require JavaScript and contains insufficient readable HTML."
+    if not content:
+        return "The page contains no readable HTML content."
+    return None
+
+
 def _extract_html(
     requested_url: str, final_url: httpx.URL, html: bytes, encoding: str | None
 ) -> ExtractionResult:
@@ -272,29 +327,32 @@ def _extract_html(
         "javascript" in tag.get_text(" ", strip=True).lower()
         for tag in soup.find_all("noscript")
     )
-    challenge_hint = soup.select_one("#challenge-form, .g-recaptcha, .h-captcha, .cf-turnstile")
+    challenge_hint = soup.select_one("#challenge-form, .g-recaptcha, .h-captcha, .cf-turnstile") is not None
 
     if soup.head is not None:
         soup.head.decompose()
     body = soup.body if soup.body is not None else soup
     _strip_noise(body)
     content = "\n".join(_text_blocks(body))
+    h1, h2, h3 = (
+        _unique([_clean_text(tag.get_text(" ", strip=True)) for tag in body.find_all(level)])
+        for level in ("h1", "h2", "h3")
+    )
+    links = _extract_links(body, final_url)
 
     warnings = []
     if not title:
         warnings.append("The page has no title.")
     if not description:
         warnings.append("The page has no meta description.")
-    if (title or "").lower() in _CHALLENGE_TITLES or (challenge_hint is not None and len(content) < 200):
-        failure = "The website returned a bot challenge or CAPTCHA."
-    elif len(content) < 80 and javascript_hint:
-        failure = "The page appears to require JavaScript and contains insufficient readable HTML."
-    elif not content:
-        failure = "The page contains no readable HTML content."
-    else:
-        failure = None
+    prose = _text_blocks(body, prose_only=True)
+    word_count = sum(len(_WORD.findall(block)) for block in prose)
+    is_sparse = word_count < 12 or (word_count < 24 and len(prose) < 2)
+    failure = _page_failure(title, h1, content, challenge_hint and is_sparse, javascript_hint)
     if failure:
         warnings.append(failure)
+    elif is_sparse:
+        warnings.append("The page contains too little readable business content for reliable analysis.")
 
     return ExtractionResult(
         requested_url=requested_url,
@@ -302,12 +360,13 @@ def _extract_html(
         title=title or None,
         meta_description=description,
         meta_keywords=_unique([_clean_text(word) for word in (keywords or "").split(",")]),
-        h1_headings=_unique([_clean_text(tag.get_text(" ", strip=True)) for tag in body.find_all("h1")]),
-        h2_headings=_unique([_clean_text(tag.get_text(" ", strip=True)) for tag in body.find_all("h2")]),
-        h3_headings=_unique([_clean_text(tag.get_text(" ", strip=True)) for tag in body.find_all("h3")]),
+        h1_headings=h1,
+        h2_headings=h2,
+        h3_headings=h3,
         main_content=content,
-        links=_extract_links(body, final_url),
+        links=links,
         image_alt_text=_unique([_clean_text(str(tag["alt"])) for tag in body.find_all("img", alt=True)]),
         warnings=warnings,
         success=failure is None,
+        is_sparse=failure is None and is_sparse,
     )
