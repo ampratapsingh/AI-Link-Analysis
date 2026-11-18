@@ -23,7 +23,32 @@ from app.providers.base import LLMConfigurationError, LLMOutputError, LLMProvide
 from app.schemas import GeneratedAnalysis
 
 logger = logging.getLogger(__name__)
-_ANALYSIS_SCHEMA = transform_schema(GeneratedAnalysis)
+
+
+def _build_analysis_schema() -> dict[str, object]:
+    schema = transform_schema(GeneratedAnalysis)
+    definitions = schema["$defs"]
+    competitor = definitions["Competitor"]
+    comparison = definitions["CompetitorAnalysis"]
+
+    # Required nullable values avoid optional grammar branches without losing any fields.
+    competitor["required"] = list(competitor["properties"])
+    comparison["required"] = list(comparison["properties"])
+    # The application sets the real research status after generation.
+    comparison["properties"]["research_status"] = {"type": "null"}
+
+    # Keep the URL grammar simple inside nested arrays. Pydantic still enforces HttpUrl.
+    url_schemas = (
+        competitor["properties"]["website"]["anyOf"][0],
+        definitions["Evidence"]["properties"]["url"],
+    )
+    for url_schema in url_schemas:
+        del url_schema["format"]
+        url_schema["description"] = "An absolute HTTP or HTTPS URL."
+    return schema
+
+
+_ANALYSIS_SCHEMA = _build_analysis_schema()
 
 _ERROR_MESSAGES = {
     "authentication_error": "Anthropic rejected authentication.",
@@ -52,7 +77,7 @@ def _log_http_error(exc: APIStatusError) -> None:
     if isinstance(message, str):
         message = message[:1024].lower()
         if exc.status_code == 400:
-            if message.startswith("schema is too complex for compilation"):
+            if "schema is too complex for compilation" in message:
                 summary = "Structured output schema is too complex to compile."
             elif "output_config.format" in message or "schema" in message:
                 summary = "Anthropic reported a structured output schema error."

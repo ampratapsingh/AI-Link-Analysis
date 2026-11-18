@@ -6,8 +6,9 @@ import httpx
 import pytest
 
 from app.config import Settings, load_settings
-from app.providers.anthropic_provider import AnthropicAnalysisProvider
+from app.providers.anthropic_provider import AnthropicAnalysisProvider, _ANALYSIS_SCHEMA
 from app.providers.base import LLMConfigurationError, LLMOutputError, LLMProviderError
+from app.schemas import GeneratedAnalysis
 from app.services.analysis_service import get_analysis_provider
 
 pytestmark = [pytest.mark.anyio, pytest.mark.parametrize("anyio_backend", ["asyncio"])]
@@ -18,10 +19,70 @@ def provider():
     return AnthropicAnalysisProvider(Settings(anthropic_api_key="fixture-key", llm_max_output_tokens=1250))
 
 
+async def test_analysis_schema_uses_simple_anthropic_subset_and_preserves_fields():
+    schema = _ANALYSIS_SCHEMA
+    definitions = schema["$defs"]
+    public_shape = GeneratedAnalysis.model_json_schema()
+    allowed_keywords = {
+        "$defs", "$ref", "additionalProperties", "anyOf", "description", "enum",
+        "items", "minItems", "properties", "required", "title", "type",
+    }
+
+    def check(node, ancestors=()):
+        assert node.keys() <= allowed_keywords
+        if "$ref" in node:
+            assert node.keys() == {"$ref"}
+            prefix = "#/$defs/"
+            assert node["$ref"].startswith(prefix)
+            name = node["$ref"][len(prefix):]
+            assert name not in ancestors
+            return check(definitions[name], (*ancestors, name))
+        if "anyOf" in node:
+            assert [branch["type"] for branch in node["anyOf"]] == ["string", "null"]
+            return 1 + sum(check(branch, ancestors) for branch in node["anyOf"])
+        if "minItems" in node:
+            assert node["type"] == "array"
+            assert node["minItems"] in (0, 1)
+        if node["type"] == "object":
+            assert node["additionalProperties"] is False
+            assert set(node["required"]) == node["properties"].keys()
+            return sum(check(child, ancestors) for child in node["properties"].values())
+        if node["type"] == "array":
+            return check(node["items"], ancestors)
+        assert node["type"] in {"string", "null"}
+        return 0
+
+    assert check(schema) == 10
+    assert definitions.keys() == public_shape["$defs"].keys()
+    assert schema["properties"].keys() == public_shape["properties"].keys()
+    for name, definition in definitions.items():
+        original = public_shape["$defs"][name]
+        assert definition.get("properties", {}).keys() == original.get("properties", {}).keys()
+
+    assert definitions["CompetitorAnalysis"]["properties"]["research_status"] == {"type": "null"}
+    assert set(definitions["Analysis"]["required"]) == {
+        "competitor_analysis", "target_search_queries", "seo_improvements", "top_services", "target_audience",
+    }
+
+
 async def test_messages_uses_structured_output_and_logs_only_metrics(
     provider, mock_anthropic, anthropic_response, analysis, caplog
 ):
     calls = []
+    comparison = analysis["analysis"]["competitor_analysis"]
+    comparison["research_status"] = None
+    comparison["competitors"] = [{
+        "name": "Example IT",
+        "website": "https://example.org",
+        "main_offerings": [],
+        "target_market": None,
+        "strengths": [],
+        "gaps": [],
+        "evidence_status": "potential",
+        "sources": [{"url": "https://example.org/info", "excerpt": "Example IT"}],
+        "business_overview": None,
+        "category": None,
+    }]
 
     def handler(request):
         assert request.url.path == "/v1/messages"
@@ -36,10 +97,7 @@ async def test_messages_uses_structured_output_and_logs_only_metrics(
         assert "tools" not in body
         output_format = body["output_config"]["format"]
         assert output_format["type"] == "json_schema"
-        schema = output_format["schema"]
-        assert schema["additionalProperties"] is False
-        assert set(schema["required"]) == {"brand", "analysis"}
-        assert set(schema["$defs"]["Analysis"]["required"]) == set(analysis["analysis"])
+        assert output_format["schema"] == _ANALYSIS_SCHEMA
         return anthropic_response(json.dumps(analysis))
 
     mock_anthropic(handler)
@@ -48,6 +106,11 @@ async def test_messages_uses_structured_output_and_logs_only_metrics(
 
     assert result.brand.name == analysis["brand"]["name"]
     assert len(result.analysis.target_search_queries) == 5
+    competitor = result.analysis.competitor_analysis.competitors[0]
+    assert competitor.website.host == "example.org"
+    assert competitor.sources[0].excerpt == "Example IT"
+    assert competitor.business_overview is None
+    assert result.analysis.competitor_analysis.research_status is None
     assert len(calls) == 1
     assert "input_tokens=200 output_tokens=95" in caplog.text
     assert "fixture-key" not in caplog.text and "Private fixture evidence" not in caplog.text
@@ -120,7 +183,7 @@ async def test_provider_errors_are_sanitized_and_retries_bounded(
 @pytest.mark.parametrize(
     ("status", "upstream_type", "message", "logged_type", "summary"),
     [
-        (400, "invalid_request_error", "Schema is too complex for compilation",
+        (400, "invalid_request_error", "output_config.format: Schema is too complex for compilation",
          "invalid_request_error", "Structured output schema is too complex to compile."),
         (400, "invalid_request_error", "output_config.format.schema: invalid",
          "invalid_request_error", "Anthropic reported a structured output schema error."),
@@ -189,6 +252,16 @@ async def test_local_pydantic_validation_enforces_query_count(
     provider, mock_anthropic, anthropic_response, analysis
 ):
     analysis["analysis"]["target_search_queries"].pop()
+    mock_anthropic(lambda _: anthropic_response(json.dumps(analysis)))
+    with pytest.raises(LLMOutputError) as error:
+        await provider.generate(system_prompt="Instructions", content="Evidence")
+    assert error.value.code == "invalid_output"
+
+
+async def test_local_pydantic_validation_enforces_http_urls(
+    provider, mock_anthropic, anthropic_response, analysis
+):
+    analysis["analysis"]["top_services"][0]["sources"][0]["url"] = "ftp://example.org/info"
     mock_anthropic(lambda _: anthropic_response(json.dumps(analysis)))
     with pytest.raises(LLMOutputError) as error:
         await provider.generate(system_prompt="Instructions", content="Evidence")
