@@ -180,7 +180,6 @@ async def test_missing_required_section_fails_pydantic_validation(mock_openai, p
     [
         ("too_few_queries", "invalid_output"),
         ("duplicate_query", "invalid_queries"),
-        ("fabricated_evidence", "invalid_evidence"),
         ("fabricated_competitor", "unverified_competitor"),
     ],
 )
@@ -191,8 +190,6 @@ async def test_invalid_business_output_is_rejected(mock_openai, page, settings, 
         queries.pop()
     elif problem == "duplicate_query":
         queries[1]["query"] = " Managed  IT "
-    elif problem == "fabricated_evidence":
-        sections["top_services"][0]["sources"][0]["excerpt"] = "We provide data recovery."
     else:
         sections["competitor_analysis"]["competitors"] = [
             {

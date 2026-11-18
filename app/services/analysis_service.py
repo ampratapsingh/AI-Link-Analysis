@@ -54,9 +54,10 @@ prose when the schema has no inference field. Use null for unavailable nullable 
   business relevance, and target audience. Use only the schema's platform values.
 - Recommend specific, actionable SEO keywords, an SEO title, a meta description, and
   supporting content ideas. Do not invent statistics, search volumes, or rankings.
-- Return up to five important services. For each website service include the supplied source_url
-  and a short, verbatim excerpt from one supplied evidence entry that substantiates it. Use
-  inferred only for a clearly labeled recommendation, never for an unverified existing
+- Return up to five important services. For each website service copy the exact top-level
+  source_url and a short, verbatim excerpt from one supplied evidence entry that substantiates
+  it. Do not paraphrase or combine excerpts. Omit website services without supporting evidence.
+  Use inferred only for a clearly labeled recommendation, never for an unverified existing
   offering. Links are labels from the submitted page and do not establish linked-page facts.
   Do not invent services or pad the list.
 - Describe likely primary and secondary customers, industries, customer needs and challenges,
@@ -261,9 +262,12 @@ def _validate_grounding(
     comparison.competitors = list(competitors.values())
     comparison.research_status = research.status
 
+    grounded_services = []
+    missing_sources = invalid_sources = 0
     for service in result.analysis.top_services:
         if service.evidence_status == "website" and not service.sources:
-            raise LLMOutputError("invalid_evidence", "A website service has no supporting excerpt.")
+            missing_sources += 1
+            continue
         for source in service.sources:
             excerpt = _compact(source.excerpt)
             if (
@@ -271,4 +275,14 @@ def _validate_grounding(
                 or not excerpt
                 or not any(excerpt in text for text in prepared.evidence)
             ):
-                raise LLMOutputError("invalid_evidence", "A service cited unavailable website evidence.")
+                invalid_sources += 1
+                break
+        else:
+            grounded_services.append(service)
+    result.analysis.top_services = grounded_services
+    if missing_sources or invalid_sources:
+        logger.warning(
+            "Omitted services with unverified evidence missing_sources=%d invalid_sources=%d",
+            missing_sources,
+            invalid_sources,
+        )

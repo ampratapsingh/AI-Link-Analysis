@@ -238,6 +238,8 @@ Haiku 5.5 runs with thinking disabled to leave the generation budget for the fiv
 
 If Claude stops at its output token limit, the API returns `llm_output_truncated`. The adapter rejects the incomplete JSON and does not regenerate it, avoiding a second generation charge. The Claude log line shows the active token limit and whether the response came from native structured output or prompt-only JSON.
 
+A service with a missing required citation or a citation that fails verification is omitted from `top_services`. The response still includes all five analysis sections, and `top_services` can be empty. Logs report omission counts.
+
 ### Model comparison and estimated cost
 
 The [provider comparison](docs/LLM_COMPARISON.md) compares the default Claude Haiku 5.5 with OpenAI GPT-5.4 mini and Gemini 3.5 Flash-Lite. At 6,000 input and 1,500 output tokens, estimated uncached generation costs are $0.00135 for Claude, $0.01125 for OpenAI, and $0.00555 for Gemini. Tavily credits are separate. The report includes volume estimates, official sources, and a repeatable procedure for measuring accuracy and response time.

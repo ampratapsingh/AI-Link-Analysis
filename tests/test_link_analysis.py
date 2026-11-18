@@ -378,6 +378,54 @@ async def test_default_anthropic_provider_returns_complete_api_response(
     assert calls == ["claude-haiku-5-5"]
 
 
+@pytest.mark.parametrize("keep_verified_service", [True, False])
+async def test_anthropic_report_omits_services_with_bad_citations(
+    client, mock_anthropic, anthropic_response, analysis, caplog, keep_verified_service
+):
+    app.state.settings = Settings(anthropic_api_key="fixture-key", search_provider="none")
+    sections = analysis["analysis"]
+    verified, = sections["top_services"]
+    good_source, = verified["sources"]
+    wrong_url = "https://unverified.example/product"
+    made_up_excerpt = "We operate a private cloud backup network."
+    sections["top_services"] = [
+        {**verified, "name": "Missing citation", "sources": []},
+        {**verified, "name": "Wrong citation URL", "sources": [{**good_source, "url": wrong_url}]},
+        {**verified, "name": "Fabricated excerpt", "sources": [{**good_source, "excerpt": made_up_excerpt}]},
+        {**verified, "name": "Mixed citations", "sources": [
+            good_source, {**good_source, "excerpt": made_up_excerpt},
+        ]},
+    ]
+    if keep_verified_service:
+        sections["top_services"].insert(0, verified)
+
+    calls = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        calls.append(body)
+        if "output_config" in body:
+            return httpx.Response(400, json={
+                "error": {"type": "invalid_request_error", "message": "output_config.format: schema rejected"},
+            })
+        return anthropic_response(json.dumps(analysis))
+
+    mock_anthropic(handler)
+    response = await client.post("/link-analysis", json={"url": URL})
+
+    assert response.status_code == 200
+    result = LinkAnalysisResponse.model_validate(response.json())
+    assert set(response.json()["analysis"]) == set(sections)
+    assert [service.name for service in result.analysis.top_services] == (
+        [verified["name"]] if keep_verified_service else []
+    )
+    assert "missing_sources=1 invalid_sources=3" in caplog.text
+    for unverified in (wrong_url, made_up_excerpt):
+        assert unverified not in response.text
+        assert unverified not in caplog.text
+    assert len(calls) == 2
+
+
 @pytest.mark.parametrize(("upstream", "code"), [(429, "llm_rate_limited"), (503, "llm_provider_error")])
 async def test_llm_temporarily_unavailable(client, mock_openai, upstream, code):
     mock_openai(
