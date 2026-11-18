@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import re
 from time import perf_counter
@@ -49,6 +50,13 @@ def _build_analysis_schema() -> dict[str, object]:
 
 
 _ANALYSIS_SCHEMA = _build_analysis_schema()
+_JSON_FALLBACK_INSTRUCTIONS = (
+    "\n\nReturn exactly one JSON object matching this schema. "
+    "Do not include Markdown fences, comments, or surrounding prose.\n"
+    + json.dumps(_ANALYSIS_SCHEMA, separators=(",", ":"))
+)
+_SCHEMA_COMPLEXITY_ERROR = "Structured output schema is too complex to compile."
+_SCHEMA_FORMAT_ERROR = "Anthropic reported a structured output schema error."
 
 _ERROR_MESSAGES = {
     "authentication_error": "Anthropic rejected authentication.",
@@ -65,7 +73,7 @@ _ERROR_MESSAGES = {
 }
 
 
-def _log_http_error(exc: APIStatusError) -> None:
+def _http_error_details(exc: APIStatusError) -> tuple[str, str]:
     # Upstream messages can echo arbitrary input. Classify their content without logging it.
     body = exc.body
     detail = body.get("error", body) if isinstance(body, dict) else None
@@ -78,15 +86,19 @@ def _log_http_error(exc: APIStatusError) -> None:
         message = message[:1024].lower()
         if exc.status_code == 400:
             if "schema is too complex for compilation" in message:
-                summary = "Structured output schema is too complex to compile."
+                summary = _SCHEMA_COMPLEXITY_ERROR
             elif "output_config.format" in message or "schema" in message:
-                summary = "Anthropic reported a structured output schema error."
+                summary = _SCHEMA_FORMAT_ERROR
             elif "max_tokens" in message:
                 summary = "Anthropic reported a max_tokens error."
             elif "thinking" in message or "output_config.effort" in message:
                 summary = "Anthropic reported a thinking or effort configuration error."
         elif exc.status_code == 404 and message.startswith("model:"):
             summary = "The requested model was not found for this API client."
+    return error_type, summary
+
+
+def _log_http_error(exc: APIStatusError, error_type: str, summary: str) -> None:
     logger.warning(
         "Anthropic HTTP error status=%d error_type=%s message=%s",
         exc.status_code,
@@ -118,14 +130,30 @@ class AnthropicAnalysisProvider:
                     timeout=self._settings.llm_timeout_seconds,
                     max_retries=1,
                 ) as client:
-                    reply = await client.messages.create(
-                        model=self._model,
-                        system=system_prompt,
-                        messages=[{"role": "user", "content": content}],
-                        max_tokens=self._settings.llm_max_output_tokens,
-                        output_config={"format": {"type": "json_schema", "schema": _ANALYSIS_SCHEMA}},
-                        thinking={"type": "disabled"} if self._model == "claude-haiku-5-5" else omit,
-                    )
+                    request = {
+                        "model": self._model,
+                        "messages": [{"role": "user", "content": content}],
+                        "max_tokens": self._settings.llm_max_output_tokens,
+                        "thinking": {"type": "disabled"} if self._model == "claude-haiku-5-5" else omit,
+                    }
+                    try:
+                        reply = await client.messages.create(
+                            **request,
+                            system=system_prompt,
+                            output_config={"format": {"type": "json_schema", "schema": _ANALYSIS_SCHEMA}},
+                        )
+                    except BadRequestError as exc:
+                        error_type, summary = _http_error_details(exc)
+                        if error_type != "invalid_request_error" or summary not in (
+                            _SCHEMA_FORMAT_ERROR, _SCHEMA_COMPLEXITY_ERROR
+                        ):
+                            raise
+                        _log_http_error(exc, error_type, summary)
+                        logger.warning("Anthropic rejected the schema. Trying prompt-only JSON once.")
+                        reply = await client.with_options(max_retries=0).messages.create(
+                            **request,
+                            system=system_prompt + _JSON_FALLBACK_INSTRUCTIONS,
+                        )
                     if reply.usage is not None:
                         if isinstance(reply.usage.input_tokens, int):
                             input_tokens = reply.usage.input_tokens
@@ -149,7 +177,7 @@ class AnthropicAnalysisProvider:
         except (TimeoutError, APITimeoutError):
             raise LLMProviderError("timeout", "The Claude analysis request timed out.") from None
         except APIStatusError as exc:
-            _log_http_error(exc)
+            _log_http_error(exc, *_http_error_details(exc))
             if isinstance(exc, RateLimitError):
                 raise LLMProviderError("rate_limited", "Anthropic rate limited the analysis request.") from None
             if isinstance(exc, (AuthenticationError, PermissionDeniedError)):

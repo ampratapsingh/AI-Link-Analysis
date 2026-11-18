@@ -221,7 +221,7 @@ The extractor reads static HTML and supports identity and single-member gzip enc
 
 ## LLM analysis
 
-`generate_analysis(page, settings)` accepts a successful extraction result and returns the typed brand and five analysis sections. The model receives fixed instructions and a separate JSON user message containing prioritized website evidence and optional competitor snippets. The default Claude adapter uses the Messages API with a JSON Schema derived from Pydantic. It checks the stop reason before validating the output locally. The service checks query distinctness and verifies citations against the evidence sent to the model. [Claude structured outputs](https://platform.claude.com/docs/en/build-with-claude/structured-outputs)
+`generate_analysis(page, settings)` accepts a successful extraction result and returns the typed brand and five analysis sections. The model receives fixed instructions and a separate JSON user message containing prioritized website evidence and optional competitor snippets. The default Claude adapter uses the Messages API with a JSON Schema derived from Pydantic. If Anthropic rejects the structured-output schema with HTTP 400, the adapter makes one fallback request with the schema in the system prompt. Both paths check the stop reason and validate the JSON locally. The service checks query distinctness and verifies citations against the evidence sent to the model. [Claude structured outputs](https://platform.claude.com/docs/en/build-with-claude/structured-outputs)
 
 | Setting | Default |
 | --- | --- |

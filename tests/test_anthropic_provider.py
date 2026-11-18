@@ -116,6 +116,77 @@ async def test_messages_uses_structured_output_and_logs_only_metrics(
     assert "fixture-key" not in caplog.text and "Private fixture evidence" not in caplog.text
 
 
+async def test_schema_rejection_falls_back_to_locally_validated_json(
+    provider, mock_anthropic, anthropic_response, analysis, caplog
+):
+    calls = []
+    system_prompt = "Private system instructions"
+    content = "Private website evidence"
+    analysis["analysis"]["competitor_analysis"]["research_status"] = None
+
+    def handler(request):
+        body = json.loads(request.content)
+        calls.append(body)
+        if len(calls) == 1:
+            assert body["output_config"]["format"]["schema"] == _ANALYSIS_SCHEMA
+            return httpx.Response(400, json={
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": f"output_config.format: schema rejected. {content}",
+                },
+            })
+        assert "output_config" not in body
+        assert "tools" not in body
+        instructions, _, schema = body["system"].rpartition("\n")
+        assert instructions.startswith(system_prompt)
+        assert "Return exactly one JSON object" in instructions
+        assert json.loads(schema) == _ANALYSIS_SCHEMA
+        assert content not in body["system"]
+        for key in ("model", "max_tokens", "thinking", "messages"):
+            assert body[key] == calls[0][key]
+        return anthropic_response(json.dumps(analysis))
+
+    mock_anthropic(handler)
+    result = await provider.generate(system_prompt=system_prompt, content=content)
+
+    assert result == GeneratedAnalysis.model_validate(analysis)
+    assert len(calls) == 2
+    assert "status=400 error_type=invalid_request_error" in caplog.text
+    assert "Trying prompt-only JSON once" in caplog.text
+    for sensitive in ("fixture-key", system_prompt, content):
+        assert sensitive not in caplog.text
+
+
+@pytest.mark.parametrize("outcome", ["malformed_json", "overloaded"])
+async def test_failed_fallback_never_makes_another_request(
+    provider, mock_anthropic, anthropic_response, outcome
+):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        if len(calls) == 1:
+            return httpx.Response(400, json={
+                "error": {"type": "invalid_request_error", "message": "Schema is too complex for compilation."},
+            })
+        if outcome == "malformed_json":
+            return anthropic_response('{"brand":{}}')
+        return httpx.Response(
+            529,
+            headers={"retry-after-ms": "1"},
+            json={"error": {"type": "overloaded_error", "message": "Overloaded"}},
+        )
+
+    mock_anthropic(handler)
+    expected_type = LLMOutputError if outcome == "malformed_json" else LLMProviderError
+    with pytest.raises(expected_type) as error:
+        await provider.generate(system_prompt="Instructions", content="Evidence")
+
+    assert error.value.code == ("invalid_output" if outcome == "malformed_json" else "provider_error")
+    assert len(calls) == 2
+
+
 @pytest.mark.parametrize("key", [None, "", " "])
 async def test_missing_credentials_do_not_fall_back_to_openai(key):
     with pytest.raises(LLMConfigurationError) as error:
