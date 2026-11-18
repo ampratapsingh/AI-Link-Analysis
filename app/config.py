@@ -23,7 +23,7 @@ class Settings(BaseModel):
     search_provider: str = "tavily"
     search_api_key: SecretStr | None = None
     search_max_results: int = Field(default=5, ge=1, le=20)
-    search_timeout_seconds: float = Field(default=5.0, gt=0, allow_inf_nan=False)
+    search_timeout_seconds: float = Field(default=10.0, gt=0, allow_inf_nan=False)
     website_request_timeout: float = Field(default=10.0, gt=0, allow_inf_nan=False)
     max_website_response_size: int = Field(default=2_097_152, gt=0)
     max_website_redirects: int = Field(default=3, ge=0)

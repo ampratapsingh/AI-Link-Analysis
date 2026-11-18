@@ -256,14 +256,14 @@ A service with a missing required citation or a citation that fails verification
 
 ## Optional competitor research
 
-Tavily receives up to two short searches based on the submitted site's title, headings, and service descriptions. The application favors results whose company name matches the source domain and filters self-matches, duplicates, and results without relevant business terms. It sends snippets as untrusted data within the existing LLM content budget. The app uses the search response as evidence and does not fetch the full competitor pages. [Tavily Search API](https://docs.tavily.com/documentation/api-reference/endpoint/search)
+Tavily receives up to two short searches based on the submitted site's title, headings, and service descriptions. The second search is skipped when the first yields relevant, attributable snippets for three distinct companies that fit the model's evidence budget. The application favors results whose company name matches the source domain and filters self-matches, duplicates, and results without relevant business terms. It sends snippets as untrusted data within the existing LLM content budget. The app uses the search response as evidence and does not fetch the full competitor pages. [Tavily Search API](https://docs.tavily.com/documentation/api-reference/endpoint/search)
 
 | Setting | Default |
 | --- | --- |
 | `SEARCH_PROVIDER` | `tavily`. Set to `none` to disable. |
 | `SEARCH_API_KEY` | Unset. Set to your Tavily API key to enable search. |
 | `SEARCH_MAX_RESULTS` | 5 per query and at most 5 retained sources with the default budget |
-| `SEARCH_TIMEOUT_SECONDS` | 5 seconds for the search stage |
+| `SEARCH_TIMEOUT_SECONDS` | 10 seconds total for the search stage. An explicit environment value overrides the default. |
 
 The API reports the search outcome in `analysis.competitor_analysis.research_status`. `search_snippets` means snippets were supplied to the model. `not_configured`, `unavailable`, `no_relevant_results`, and `insufficient_budget` indicate why the request used page-only evidence. A timeout, rate limit, or malformed search response falls back to page-only evidence unless earlier search results are usable.
 

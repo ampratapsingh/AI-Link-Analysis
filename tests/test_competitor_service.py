@@ -183,6 +183,55 @@ async def test_search_keeps_earlier_evidence_if_second_query_fails(
     assert str(research.sources[0].url) == COMPANY_URL
 
 
+async def test_second_query_timeout_keeps_earlier_evidence(mock_search, business_page, search_settings, caplog):
+    calls = []
+
+    async def tavily(request):
+        calls.append(request)
+        if len(calls) == 1:
+            return httpx.Response(200, json={"results": [hit()]})
+        await asyncio.Event().wait()
+
+    mock_search(tavily)
+    research = await discover_competitors(
+        business_page, search_settings.model_copy(update={"search_timeout_seconds": 0.1})
+    )
+
+    assert len(calls) == 2
+    assert research.status == "search_snippets"
+    assert str(research.sources[0].url) == COMPANY_URL
+    assert "reason=deadline completed_queries=1" in caplog.text
+    assert "mock-tavily-key" not in caplog.text and "Northwind" not in caplog.text
+
+
+@pytest.mark.parametrize(("content_budget", "expected_calls"), [(12000, 1), (900, 2)])
+async def test_search_stops_when_three_attributed_candidates_fit(
+    mock_search, business_page, search_settings, content_budget, expected_calls
+):
+    calls = []
+    results = [
+        hit(
+            f"https://{name.lower()}.example/cloud",
+            f"{name} | Cloud Hosting",
+            f"{name} offers managed cloud hosting and Kubernetes migration.",
+        )
+        for name in ("Contoso", "Fabrikam", "Adatum")
+    ]
+
+    def tavily(request):
+        calls.append(request)
+        assert request.extensions["timeout"]["read"] == 10.0
+        return httpx.Response(200, json={"results": results})
+
+    mock_search(tavily)
+    settings = search_settings.model_copy(update={"llm_max_content_chars": content_budget})
+    research = await discover_competitors(business_page, settings)
+
+    assert research.status == "search_snippets"
+    assert {source.company_name for source in research.sources} == {"Contoso", "Fabrikam", "Adatum"}
+    assert len(calls) == expected_calls
+
+
 async def test_claims_require_complete_company_excerpts_and_matching_urls(
     mock_search, business_page, search_settings
 ):

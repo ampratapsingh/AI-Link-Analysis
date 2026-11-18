@@ -272,7 +272,7 @@ async def test_external_competitor_research_uses_one_llm_call_and_degrades_grace
     assert len(result.analysis.target_search_queries) == 5
     competitors = result.analysis.competitor_analysis.competitors
     if search_status == 200:
-        assert calls == ["search", "search", "llm"]
+        assert calls == ["search", "llm"]
         assert result.analysis.competitor_analysis.research_status == "search_snippets"
         assert {str(competitor.website) for competitor in competitors} == sources.keys()
         for competitor in competitors:

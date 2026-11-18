@@ -50,12 +50,16 @@ def _build_analysis_schema() -> dict[str, object]:
 
 
 _ANALYSIS_SCHEMA = _build_analysis_schema()
+_ANALYSIS_SECTIONS = frozenset(_ANALYSIS_SCHEMA["$defs"]["Analysis"]["properties"])
+_JSON_FENCE = re.compile(r"```(?:json)?[ \t]*\r?\n(.*)\r?\n[ \t]*```", re.IGNORECASE | re.DOTALL)
+_SAFE_VALIDATION_TYPES = {"json_invalid", "missing", "literal_error", "enum", "too_short", "too_long", "extra_forbidden"}
 _JSON_FALLBACK_INSTRUCTIONS = (
     "\n\nReturn exactly one compact JSON object matching this schema. "
     "Do not include Markdown fences, comments, or surrounding prose. "
     "Use short phrases or single sentences for generated text. Keep open-ended recommendation "
     "and audience lists to at most three distinct entries each. Keep all required fields and "
-    "exactly five search queries. Preserve required verbatim evidence excerpts.\n"
+    "exactly five search queries. Use empty arrays for unsupported lists and null for unavailable "
+    "nullable fields. Preserve required verbatim evidence excerpts, escaping quotes as JSON.\n"
     + json.dumps(_ANALYSIS_SCHEMA, separators=(",", ":"))
 )
 _SCHEMA_COMPLEXITY_ERROR = "Structured output schema is too complex to compile."
@@ -107,6 +111,26 @@ def _log_http_error(exc: APIStatusError, error_type: str, summary: str) -> None:
         exc.status_code,
         error_type,
         summary,
+    )
+
+
+def _log_validation_error(exc: ValidationError, output_mode: str) -> None:
+    errors = exc.errors(include_input=False, include_context=False, include_url=False)
+    problems = set()
+    for error in errors:
+        location = error["loc"]
+        section = location[0] if location[:1] in {("brand",), ("analysis",)} else "root"
+        if section == "analysis" and len(location) > 1 and location[1] in _ANALYSIS_SECTIONS:
+            section = location[1]
+        error_type = error["type"]
+        if error_type not in _SAFE_VALIDATION_TYPES:
+            error_type = "invalid_value"
+        problems.add(f"{section}:{error_type}")
+    logger.warning(
+        "Claude analysis validation failed output_mode=%s error_count=%d problems=%s",
+        output_mode,
+        len(errors),
+        ",".join(sorted(problems)[:6]),
     )
 
 
@@ -177,9 +201,15 @@ class AnthropicAnalysisProvider:
                     text = [block.text for block in reply.content if block.type == "text"]
                     if not text or not any(part.strip() for part in text):
                         raise LLMOutputError("missing_output", "Claude returned no structured analysis.")
-                    if len(text) != 1:
+                    if output_mode == "structured" and len(text) != 1:
+                        logger.warning("Claude structured response had multiple text blocks count=%d", len(text))
                         raise LLMOutputError("invalid_output", "Claude returned multiple text blocks.")
-                    return GeneratedAnalysis.model_validate_json(text[0])
+                    raw_json = "".join(text).strip()
+                    if output_mode == "prompt_json":
+                        fenced = _JSON_FENCE.fullmatch(raw_json)
+                        if fenced:
+                            raw_json = fenced.group(1)
+                    return GeneratedAnalysis.model_validate_json(raw_json)
         except (TimeoutError, APITimeoutError):
             raise LLMProviderError("timeout", "The Claude analysis request timed out.") from None
         except APIStatusError as exc:
@@ -199,7 +229,11 @@ class AnthropicAnalysisProvider:
             raise LLMProviderError("provider_error", "The Anthropic analysis request failed.") from None
         except APIError:
             raise LLMProviderError("provider_error", "The Anthropic analysis request failed.") from None
-        except (ValidationError, ValueError, TypeError, AttributeError):
+        except ValidationError as exc:
+            _log_validation_error(exc, output_mode)
+            raise LLMOutputError("invalid_output", "Claude returned an invalid structured analysis.") from None
+        except (ValueError, TypeError, AttributeError):
+            logger.warning("Claude response could not be decoded output_mode=%s", output_mode)
             raise LLMOutputError("invalid_output", "Claude returned an invalid structured analysis.") from None
         finally:
             logger.info(

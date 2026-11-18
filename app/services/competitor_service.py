@@ -3,6 +3,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass, replace
+from time import perf_counter
 
 from pydantic import HttpUrl
 
@@ -205,7 +206,8 @@ async def discover_competitors(
             return CompetitorResearch("unavailable")
         provider = TavilySearchProvider(key, settings.search_timeout_seconds)
 
-    if settings.llm_max_content_chars // 3 < 300:
+    prompt_budget = settings.llm_max_content_chars // 3
+    if prompt_budget < 300:
         return CompetitorResearch("insufficient_budget")
     host = HttpUrl(page.final_url).host or ""
     queries, terms = _search_queries(page, host)
@@ -213,19 +215,41 @@ async def discover_competitors(
         return CompetitorResearch("no_relevant_results")
 
     hits = []
+    evidence: tuple[CompetitorSource, ...] = ()
     failed = False
+    completed = 0
+    started = perf_counter()
     try:
         async with asyncio.timeout(settings.search_timeout_seconds):
             for query in queries:
                 hits.extend(await provider.search(query, max_results=settings.search_max_results))
+                completed += 1
+                evidence = _sources(hits, host, terms, settings.search_max_results)
+                if completed < len(queries) and len(evidence) >= 3:
+                    _, fitted = CompetitorResearch("search_snippets", evidence).fit_prompt(prompt_budget)
+                    companies = {
+                        _name_key(source.company_name)
+                        for source in fitted.sources
+                        if source.company_name and any(
+                            _mentions(source.company_name, excerpt) or _FIRST_PERSON_COMPANY.match(excerpt)
+                            for excerpt in source.excerpts
+                        )
+                    }
+                    if len(companies) >= 3:
+                        break
     except SearchError as exc:
         failed = True
-        logger.warning("Competitor search unavailable reason=%s", exc.code)
+        logger.warning("Competitor search interrupted reason=%s completed_queries=%d", exc.code, completed)
     except TimeoutError:
         failed = True
-        logger.warning("Competitor search unavailable reason=deadline")
+        logger.warning("Competitor search interrupted reason=deadline completed_queries=%d", completed)
 
-    evidence = _sources(hits, host, terms, settings.search_max_results)
+    logger.info(
+        "Competitor search finished duration_ms=%d completed_queries=%d usable_sources=%d",
+        (perf_counter() - started) * 1000,
+        completed,
+        len(evidence),
+    )
     if evidence:
         return CompetitorResearch("search_snippets", evidence)
     return CompetitorResearch("unavailable" if failed else "no_relevant_results")

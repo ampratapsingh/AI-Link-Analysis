@@ -116,8 +116,9 @@ async def test_messages_uses_structured_output_and_logs_only_metrics(
     assert "fixture-key" not in caplog.text and "Private fixture evidence" not in caplog.text
 
 
+@pytest.mark.parametrize("formatting", ["plain", "fenced", "split_fence"])
 async def test_schema_rejection_falls_back_to_locally_validated_json(
-    mock_anthropic, anthropic_response, analysis, caplog
+    mock_anthropic, anthropic_response, analysis, caplog, formatting
 ):
     provider = AnthropicAnalysisProvider(Settings(anthropic_api_key="fixture-key"))
     calls = []
@@ -142,12 +143,23 @@ async def test_schema_rejection_falls_back_to_locally_validated_json(
         instructions, _, schema = body["system"].rpartition("\n")
         assert instructions.startswith(system_prompt)
         assert "Return exactly one compact JSON object" in instructions
-        assert "Preserve required verbatim evidence excerpts." in instructions
+        assert "Preserve required verbatim evidence excerpts" in instructions
         assert json.loads(schema) == _ANALYSIS_SCHEMA
         assert content not in body["system"]
         for key in ("model", "max_tokens", "thinking", "messages"):
             assert body[key] == calls[0][key]
-        return anthropic_response(json.dumps(analysis))
+        payload = json.dumps(analysis)
+        if formatting == "plain":
+            return anthropic_response(payload)
+        payload = f"```json\n{payload}\n```"
+        if formatting == "fenced":
+            return anthropic_response(payload)
+        reply = anthropic_response().json()
+        midpoint = len(payload) // 2
+        reply["content"] = [
+            {"type": "text", "text": part} for part in (payload[:midpoint], payload[midpoint:])
+        ]
+        return httpx.Response(200, json=reply)
 
     mock_anthropic(handler)
     result = await provider.generate(system_prompt=system_prompt, content=content)
@@ -162,17 +174,20 @@ async def test_schema_rejection_falls_back_to_locally_validated_json(
 
 
 @pytest.mark.parametrize(
-    ("outcome", "expected_type", "code"),
+    ("outcome", "expected_type", "code", "diagnostic"),
     [
-        ("malformed_json", LLMOutputError, "invalid_output"),
-        ("truncated", LLMOutputError, "output_truncated"),
-        ("overloaded", LLMProviderError, "provider_error"),
+        ("malformed_json", LLMOutputError, "invalid_output", "root:json_invalid"),
+        ("multiple_objects", LLMOutputError, "invalid_output", "root:json_invalid"),
+        ("missing_section", LLMOutputError, "invalid_output", "target_audience:missing"),
+        ("truncated", LLMOutputError, "output_truncated", ""),
+        ("overloaded", LLMProviderError, "provider_error", ""),
     ],
 )
 async def test_failed_fallback_never_makes_another_request(
-    provider, mock_anthropic, anthropic_response, outcome, expected_type, code, caplog
+    provider, mock_anthropic, anthropic_response, analysis, outcome, expected_type, code, diagnostic, caplog
 ):
     calls = []
+    private = "Private website value"
 
     def handler(request):
         calls.append(request)
@@ -181,7 +196,13 @@ async def test_failed_fallback_never_makes_another_request(
                 "error": {"type": "invalid_request_error", "message": "Schema is too complex for compilation."},
             })
         if outcome == "malformed_json":
-            return anthropic_response('{"brand":{}}')
+            return anthropic_response(f'`{private}` {{"brand":')
+        if outcome == "multiple_objects":
+            return anthropic_response(f"```json\n{json.dumps(analysis)} {{}}\n```")
+        if outcome == "missing_section":
+            analysis["analysis"].pop("target_audience")
+            analysis[private] = "Private website content"
+            return anthropic_response(json.dumps(analysis))
         if outcome == "truncated":
             return anthropic_response('{"brand":', stop_reason="max_tokens")
         return httpx.Response(
@@ -197,6 +218,11 @@ async def test_failed_fallback_never_makes_another_request(
     assert error.value.code == code
     assert len(calls) == 2
     assert "output_mode=prompt_json max_output_tokens=1250" in caplog.text
+    if diagnostic:
+        assert "Claude analysis validation failed output_mode=prompt_json" in caplog.text
+        assert diagnostic in caplog.text
+    assert private not in caplog.text + str(error.value)
+    assert "Private website content" not in caplog.text + str(error.value)
 
 
 @pytest.mark.parametrize("key", [None, "", " "])
