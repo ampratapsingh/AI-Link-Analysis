@@ -5,6 +5,7 @@ import socket
 
 import httpx
 import pytest
+from pydantic import HttpUrl
 
 from app.config import Settings
 from app.main import app
@@ -572,6 +573,39 @@ async def test_service_fields_use_industry_cues_and_keep_claim_qualifiers(
     assert store_service["target_industry"] == "E-commerce"
     assert checkout_service["main_benefit"] == f"Website claim: {checkout}"
     assert "main_benefit" not in financing_service
+
+
+async def test_thin_competitor_citation_keeps_model_generated_comparison(
+    client, monkeypatch, mock_openai, api_response, analysis,
+):
+    url = "https://directory.example/comparison"
+    excerpt = "Choose Contoso IT for ease of use or Fabrikam for custom integrations."
+    source = competitor_service.CompetitorSource(
+        HttpUrl(url), "Comparison roundup", (excerpt,), None
+    )
+
+    async def research(*_args):
+        return competitor_service.CompetitorResearch("search_snippets", (source,))
+
+    monkeypatch.setattr(analysis_service, "discover_competitors", research)
+    analysis["analysis"]["competitor_analysis"]["competitors"] = [{
+        "name": "Contoso IT",
+        "main_offerings": ["Managed IT support"],
+        "strengths": ["inferred: May suit buyers looking for a simpler setup"],
+        "gaps": ["Check whether custom network integrations require additional work"],
+        "evidence_status": "potential", "sources": [{"url": url, "excerpt": excerpt}],
+    }]
+    mock_openai(lambda _: api_response(text=json.dumps(analysis)))
+
+    response = await client.post("/link-analysis", json={"url": URL})
+
+    assert response.status_code == 200
+    competitor, = response.json()["analysis"]["competitor_analysis"]["competitors"]
+    assert competitor["evidence_status"] == "inferred"
+    assert competitor["sources"] == [{"url": url, "excerpt": excerpt}]
+    assert competitor["main_offerings"] == ["ai_suggestion: Managed IT support"]
+    assert competitor["strengths"] == ["inferred: May suit buyers looking for a simpler setup"]
+    assert competitor["gaps"] == ["ai_suggestion: Check whether custom network integrations require additional work"]
 
 
 @pytest.mark.parametrize(("upstream", "code"), [(429, "llm_rate_limited"), (503, "llm_provider_error")])

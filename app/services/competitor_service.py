@@ -484,6 +484,8 @@ def combine_competitor_reasoning(
                 text = body.strip()
             elif candidate.evidence_status in {"inferred", "ai_suggestion"}:
                 label = candidate.evidence_status
+            elif candidate.evidence_status == "potential" and result.sources:
+                label = "ai_suggestion"
             else:
                 continue
             if not text or text in claims:

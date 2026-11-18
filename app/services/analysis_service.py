@@ -55,7 +55,13 @@ you cannot verify, and state material evidence limitations in the brand summary.
   to investigate. Avoid precise prices, metrics, feature guarantees, and categorical claims
   about missing features unless directly supported. Never invent sources or excerpts. Use
   verified, inferred, or ai_suggestion as the entry status and cite available evidence even
-  when the entry includes suggestions. Use potential for a cited lead with no usable claims.
+  when the entry includes suggestions.
+  For every competitor you include, write at least one distinct, specific item in each of
+  main_offerings, strengths, and gaps. This applies even when Tavily only returns a roundup
+  mention or no results. Use your general knowledge to suggest a likely offering and a
+  plausible strength, and identify a buyer-relevant weakness or trade-off to investigate.
+  Label items without direct evidence "inferred:" or "ai_suggestion:". Do not return a
+  name-only competitor or leave those lists empty because the available evidence is thin.
   Identify at least three relevant competitors when reasonable. Leave research_status null
   for the application to set.
   Provide actionable positioning opportunities even without competitor search results.
@@ -452,7 +458,6 @@ def _validate_grounding(
     result.analysis.top_services = sorted(
         grounded_services.values(), key=lambda service: service.evidence_status != "website"
     )[:5]
-
     seo = result.analysis.seo_improvements
     keyword = _compact(seo.primary_keyword)
     title = _compact(seo.recommended_title)
