@@ -60,7 +60,7 @@ async def test_analysis_schema_uses_simple_anthropic_subset_and_preserves_fields
         assert definition.get("properties", {}).keys() == original.get("properties", {}).keys()
 
     assert definitions["CompetitorAnalysis"]["properties"]["research_status"] == {"type": "null"}
-    assert set(definitions["Analysis"]["required"]) == {
+    assert set(definitions["GeneratedSections"]["required"]) == {
         "competitor_analysis", "target_search_queries", "seo_improvements", "top_services", "target_audience",
     }
 

@@ -158,7 +158,11 @@ async def test_success_runs_real_services_and_returns_full_response(
     result = LinkAnalysisResponse.model_validate(response.json())
     sections["competitor_analysis"]["research_status"] = "not_configured"
     sections["competitor_analysis"]["competitors"][0].update(business_overview=None, category=None)
-    assert response.json() == {"success": True, "website": URL, **analysis}
+    expected = LinkAnalysisResponse.model_validate({"success": True, "website": URL, **analysis})
+    assert response.json() == expected.model_dump(mode="json", exclude_none=True)
+    assert "website" not in response.json()["analysis"]["competitor_analysis"]["competitors"][0]
+    assert "target_industry" not in response.json()["analysis"]["top_services"][0]
+    assert "geographical_focus" not in response.json()["analysis"]["target_audience"]
     assert result.brand.name == "Northwind IT" and result.brand.category == "Managed IT"
     assert set(response.json()["analysis"]) == {
         "competitor_analysis", "target_search_queries", "seo_improvements", "top_services", "target_audience"
@@ -493,6 +497,48 @@ async def test_anthropic_report_omits_services_with_bad_citations(
         assert unverified not in response.text
         assert unverified not in caplog.text
     assert len(calls) == 2
+
+
+async def test_claude_fallback_keeps_five_cited_services_and_includes_primary_keyword(
+    client, mock_website, mock_anthropic, anthropic_response, analysis, caplog
+):
+    app.state.settings = Settings(anthropic_api_key="fixture-key", search_provider="none")
+    names = ["Email migration", "Cloud backups", "Help desk", "Endpoint support", "Network monitoring"]
+    excerpts = [f"We offer {name.lower()} for small businesses." for name in names]
+    html = b"<title>Northwind IT</title>" + "".join(f"<p>{excerpt}</p>" for excerpt in excerpts).encode()
+    mock_website(lambda _: website_response(html))
+    sections = analysis["analysis"]
+    service, = sections["top_services"]
+    services = [
+        {**service, "name": name, "description": excerpt, "sources": [{"url": URL, "excerpt": excerpt}]}
+        for name, excerpt in zip(names, excerpts)
+    ]
+    sections["top_services"] = [
+        {**service, "sources": [{"url": "ftp://example.org", "excerpt": excerpts[0]}]},
+        {**services[0], "name": names[0].upper()},
+        *services,
+    ]
+    sections["seo_improvements"]["recommended_title"] = "Northwind IT Services"
+    requests = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        requests.append(body)
+        if "output_config" in body:
+            return httpx.Response(400, json={
+                "error": {"type": "invalid_request_error", "message": "output_config.format: schema rejected"},
+            })
+        return anthropic_response(json.dumps(analysis))
+
+    mock_anthropic(handler)
+    response = await client.post("/link-analysis", json={"url": URL})
+
+    assert response.status_code == 200
+    result = LinkAnalysisResponse.model_validate(response.json())
+    assert [item.name.casefold() for item in result.analysis.top_services] == [name.casefold() for name in names]
+    assert result.analysis.seo_improvements.recommended_title == "Northwind IT Services | managed IT"
+    assert "Omitted invalid Claude service candidates count=1" in caplog.text
+    assert len(requests) == 2
 
 
 @pytest.mark.parametrize(("upstream", "code"), [(429, "llm_rate_limited"), (503, "llm_provider_error")])

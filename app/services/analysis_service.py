@@ -12,13 +12,14 @@ from app.providers.anthropic_provider import AnthropicAnalysisProvider
 from app.providers.base import AnalysisProvider, LLMConfigurationError, LLMError, LLMOutputError
 from app.providers.openai_provider import OpenAIAnalysisProvider
 from app.schemas import (
-    Analysis, Brand, CompetitorAnalysis, GeneratedAnalysis, LinkAnalysisResponse, SearchPlatform,
+    Brand, CompetitorAnalysis, GeneratedAnalysis, GeneratedSections, LinkAnalysisResponse, SearchPlatform,
     SEOImprovements, TargetAudience, TargetSearchQuery,
 )
 from app.services.competitor_service import (
     CompetitorResearch,
     discover_competitors,
     ground_researched_competitor,
+    supported_competitors,
 )
 from app.services.url_safety import UnsafeUrlError, WebsiteDnsError
 from app.services.website_extractor import ExtractionResult, WebsiteExtractor, WebsiteFetchError
@@ -56,19 +57,25 @@ you cannot verify, and state material evidence limitations in the brand summary.
   explicitly named on the submitted page, with all other fields null or empty. Identify at
   least three competitors when reliable evidence supports them. Leave research_status null
   for the application to set.
-  Suggest positioning opportunities for the submitted brand using the available evidence.
+  Suggest positioning opportunities for the submitted brand. Treat third-party lists as
+  discovery leads and avoid asserting comparative price or performance without direct evidence.
 - Generate exactly five distinct search queries. For each, provide suitable platforms, intent,
   business relevance, and target audience. Use only the schema's platform values.
 - Recommend specific, actionable SEO keywords, an SEO title, a meta description, and
-  supporting content ideas. Treat these as proposed changes. Do not present any recommendation
+  supporting content ideas. Include the selected primary keyword naturally in the proposed
+  title, and make the meta description a short, readable business summary. Treat these as
+  proposed changes. Do not present any recommendation
   as a finding about existing page content, and label ideas based on background knowledge as
   suggestions. Do not invent statistics, search volumes, or rankings.
-- Return up to five important services. For each website service copy the exact top-level
+- Return five distinct important services when the supplied evidence supports five. You may
+  include up to three additional website-backed candidates when enough evidence exists.
+  Order candidates by importance. For each website service copy the exact top-level
   source_url and a short, verbatim excerpt from one supplied evidence entry that substantiates
   it. Do not paraphrase or combine excerpts. Omit website services without supporting evidence.
   Use inferred only for a clearly labeled recommendation, never for an unverified existing
   offering. Links are labels from the submitted page and do not establish linked-page facts.
-  Do not invent services or pad the list.
+  Fill in target industry, target customer, and main benefit when supported. Do not invent
+  services or pad the list.
 - Describe likely primary and secondary customers, industries, customer needs and challenges,
   interests, and concrete marketing segments. Use geography only when supported by the page.
 
@@ -186,7 +193,7 @@ def _limited_analysis(page: ExtractionResult) -> GeneratedAnalysis:
         summary += f' Observed page title: "{_clip(page.title, 160)}".'
     return GeneratedAnalysis(
         brand=Brand(name=None, category=None, summary=summary),
-        analysis=Analysis(
+        analysis=GeneratedSections(
             competitor_analysis=CompetitorAnalysis(
                 brand_overview=(
                     "The page did not provide enough evidence to verify the business, its offerings, "
@@ -285,7 +292,7 @@ async def analyze_website(url: str, settings: Settings) -> LinkAnalysisResponse:
         result = await generate_analysis(page, settings)
 
         stage = "response"
-        return LinkAnalysisResponse(website=page.final_url, brand=result.brand, analysis=result.analysis)
+        return LinkAnalysisResponse(website=page.final_url, brand=result.brand, analysis=result.analysis.model_dump())
     except (UnsafeUrlError, WebsiteDnsError, WebsiteFetchError, LLMError) as exc:
         code = exc.code if isinstance(exc, (WebsiteFetchError, LLMError)) else type(exc).__name__
         logger.warning("Link analysis failed stage=%s error_code=%s", stage, code)
@@ -332,10 +339,18 @@ def _validate_grounding(
         ):
             raise LLMOutputError("unverified_competitor", "The analysis included an unsupported competitor claim.")
         competitors.setdefault(key, competitor)
+    for competitor in supported_competitors(research.sources):
+        key = re.sub(r"[\W_]", "", competitor.name.casefold())
+        existing = competitors.get(key)
+        if key == brand_key or (existing and existing.evidence_status == "sourced"):
+            continue
+        if existing:
+            competitor.sources.extend(source for source in existing.sources if source not in competitor.sources)
+        competitors[key] = competitor
     comparison.competitors = list(competitors.values())
     comparison.research_status = research.status
 
-    grounded_services = []
+    grounded_services = {}
     missing_sources = invalid_sources = 0
     for service in result.analysis.top_services:
         if service.evidence_status == "website" and not service.sources:
@@ -351,8 +366,18 @@ def _validate_grounding(
                 invalid_sources += 1
                 break
         else:
-            grounded_services.append(service)
-    result.analysis.top_services = grounded_services
+            key = _compact(service.name).casefold()
+            if key and (key not in grounded_services or grounded_services[key].evidence_status == "inferred"):
+                grounded_services[key] = service
+    result.analysis.top_services = sorted(
+        grounded_services.values(), key=lambda service: service.evidence_status != "website"
+    )[:5]
+
+    seo = result.analysis.seo_improvements
+    keyword = _compact(seo.primary_keyword)
+    title = _compact(seo.recommended_title)
+    if keyword and title and not re.search(r"(?<!\w)" + re.escape(keyword) + r"(?!\w)", title, re.I):
+        seo.recommended_title = f"{title} | {keyword}"
     if missing_sources or invalid_sources:
         logger.warning(
             "Omitted services with unverified evidence missing_sources=%d invalid_sources=%d",

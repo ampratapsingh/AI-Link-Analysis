@@ -145,7 +145,6 @@ Illustrative output from mocked website and model responses.
       {
         "name": "Network monitoring",
         "description": "Around-the-clock business network monitoring.",
-        "target_industry": null,
         "target_customer": "Small businesses",
         "main_benefit": "Ongoing monitoring",
         "evidence_status": "website",
@@ -169,7 +168,6 @@ Illustrative output from mocked website and model responses.
       "customer_profiles": [
         "Owners without dedicated IT staff"
       ],
-      "geographical_focus": null,
       "customer_needs": [
         "Reliable network monitoring"
       ],
@@ -242,7 +240,9 @@ Haiku 5.5 runs with thinking disabled to leave the generation budget for the fiv
 
 If Claude stops at its output token limit, the API returns `llm_output_truncated`. The adapter rejects the incomplete JSON and does not regenerate it, avoiding a second generation charge. The Claude log line shows the active token limit and whether the response came from native structured output or prompt-only JSON.
 
-A service with a missing required citation or a citation that fails verification is omitted from `top_services`. The response still includes all five analysis sections, and `top_services` can be empty. Logs report omission counts.
+The model can propose up to eight service candidates. The API removes duplicates and services with invalid evidence, then returns up to five, prioritizing those backed by the website. The response includes all five analysis sections even when no services qualify. The Claude JSON fallback can discard a malformed service candidate and validate the remaining candidates without another provider request.
+
+Optional fields with unavailable values are omitted from successful responses. Empty lists are included so clients can tell when a section has no verified entries.
 
 ### Model comparison and estimated cost
 

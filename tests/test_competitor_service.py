@@ -9,7 +9,7 @@ from app.config import Settings
 from app.providers.search import TavilySearchProvider
 from app.schemas import Competitor
 from app.services import competitor_service
-from app.services.competitor_service import discover_competitors, ground_researched_competitor
+from app.services.competitor_service import discover_competitors, ground_researched_competitor, supported_competitors
 from app.services.website_extractor import ExtractionResult
 
 pytestmark = [pytest.mark.anyio, pytest.mark.parametrize("anyio_backend", ["asyncio"])]
@@ -112,6 +112,31 @@ async def test_targeted_search_preserves_and_deduplicates_company_evidence(
     assert sent.sources == research.sources
     suffix, sent = research.fit_prompt(50)
     assert not suffix and not sent.sources and sent.status == "insufficient_budget"
+
+
+async def test_roundup_title_preserves_identifiable_company_evidence(
+    mock_search, business_page, search_settings
+):
+    strength = "Contoso provides 24/7 technical support for managed cloud hosting."
+    roundup = f"{strength} Fabrikam also offers managed cloud hosting."
+    mock_search(lambda _: httpx.Response(200, json={
+        "results": [
+            hit(title="Alternatives for managed cloud hosting", snippet=roundup),
+            hit("https://directory.example/cloud", "Cloud Hosting Directory", roundup),
+        ],
+    }))
+
+    research = await discover_competitors(business_page, search_settings)
+
+    company, directory = research.sources
+    assert str(company.url) == COMPANY_URL
+    assert company.company_name == "Contoso"
+    assert company.excerpts[0] == strength
+    assert directory.company_name is None
+    supported, = supported_competitors(research.sources)
+    assert supported.name == "Contoso"
+    assert supported.strengths == [strength]
+    assert str(supported.sources[0].url) == COMPANY_URL
 
 
 @pytest.mark.parametrize(

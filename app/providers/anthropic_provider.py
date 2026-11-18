@@ -33,8 +33,9 @@ def _build_analysis_schema() -> dict[str, object]:
     comparison = definitions["CompetitorAnalysis"]
 
     # Required nullable values avoid optional grammar branches without losing any fields.
-    competitor["required"] = list(competitor["properties"])
-    comparison["required"] = list(comparison["properties"])
+    for definition in definitions.values():
+        if "properties" in definition:
+            definition["required"] = list(definition["properties"])
     # The application sets the real research status after generation.
     comparison["properties"]["research_status"] = {"type": "null"}
 
@@ -50,7 +51,7 @@ def _build_analysis_schema() -> dict[str, object]:
 
 
 _ANALYSIS_SCHEMA = _build_analysis_schema()
-_ANALYSIS_SECTIONS = frozenset(_ANALYSIS_SCHEMA["$defs"]["Analysis"]["properties"])
+_ANALYSIS_SECTIONS = frozenset(_ANALYSIS_SCHEMA["$defs"]["GeneratedSections"]["properties"])
 _JSON_FENCE = re.compile(r"```(?:json)?[ \t]*\r?\n(.*)\r?\n[ \t]*```", re.IGNORECASE | re.DOTALL)
 _SAFE_VALIDATION_TYPES = {"json_invalid", "missing", "literal_error", "enum", "too_short", "too_long", "extra_forbidden"}
 _JSON_FALLBACK_INSTRUCTIONS = (
@@ -134,6 +135,31 @@ def _log_validation_error(exc: ValidationError, output_mode: str) -> None:
     )
 
 
+def _parse_fallback_json(raw_json: str) -> GeneratedAnalysis:
+    try:
+        return GeneratedAnalysis.model_validate_json(raw_json)
+    except ValidationError as exc:
+        invalid = set()
+        for error in exc.errors(include_input=False, include_context=False, include_url=False):
+            location = error["loc"]
+            if location[:2] != ("analysis", "top_services") or len(location) < 3:
+                raise
+            index = location[2]
+            if not isinstance(index, int):
+                raise
+            invalid.add(index)
+        # Recover valid siblings, then run the normal schema and service evidence checks.
+        payload = json.loads(raw_json)
+        candidates = payload["analysis"]["top_services"]
+        remaining = [item for index, item in enumerate(candidates) if index not in invalid]
+        if not remaining:
+            raise
+        payload["analysis"]["top_services"] = remaining
+        result = GeneratedAnalysis.model_validate(payload)
+        logger.warning("Omitted invalid Claude service candidates count=%d", len(invalid))
+        return result
+
+
 class AnthropicAnalysisProvider:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
@@ -209,6 +235,7 @@ class AnthropicAnalysisProvider:
                         fenced = _JSON_FENCE.fullmatch(raw_json)
                         if fenced:
                             raw_json = fenced.group(1)
+                        return _parse_fallback_json(raw_json)
                     return GeneratedAnalysis.model_validate_json(raw_json)
         except (TimeoutError, APITimeoutError):
             raise LLMProviderError("timeout", "The Claude analysis request timed out.") from None

@@ -21,8 +21,8 @@ class LinkAnalysisRequest(BaseModel):
 
 
 class Brand(BaseModel):
-    name: str | None
-    category: str | None
+    name: str | None = None
+    category: str | None = None
     summary: str
 
 
@@ -33,9 +33,9 @@ class Evidence(BaseModel):
 
 class Competitor(BaseModel):
     name: str
-    website: HttpUrl | None
+    website: HttpUrl | None = None
     main_offerings: list[str]
-    target_market: str | None
+    target_market: str | None = None
     strengths: list[str]
     gaps: list[str]
     evidence_status: Literal["sourced", "potential", "ai_suggestion"]
@@ -89,9 +89,9 @@ class SEOImprovements(BaseModel):
 class Service(BaseModel):
     name: str
     description: str
-    target_industry: str | None
-    target_customer: str | None
-    main_benefit: str | None
+    target_industry: str | None = None
+    target_customer: str | None = None
+    main_benefit: str | None = None
     evidence_status: Literal["website", "inferred"]
     sources: list[Evidence]
 
@@ -102,7 +102,7 @@ class TargetAudience(BaseModel):
     industries: list[str]
     business_types: list[str]
     customer_profiles: list[str]
-    geographical_focus: str | None
+    geographical_focus: str | None = None
     customer_needs: list[str]
     customer_challenges: list[str]
     customer_interests: list[str]
@@ -117,11 +117,15 @@ class Analysis(BaseModel):
     target_audience: TargetAudience
 
 
+class GeneratedSections(Analysis):
+    top_services: list[Service] = Field(max_length=8)
+
+
 class GeneratedAnalysis(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     brand: Brand
-    analysis: Analysis
+    analysis: GeneratedSections
 
 
 class LinkAnalysisResponse(BaseModel):

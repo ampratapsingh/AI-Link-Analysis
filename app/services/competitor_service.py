@@ -103,6 +103,19 @@ def _company_name(title: str, host: str) -> str | None:
     )
 
 
+def _company_from_excerpt(host: str, excerpts: tuple[str, ...]) -> str | None:
+    # A hostname can disambiguate the company when a roundup-style title omits its name.
+    labels = host.removeprefix("www.").split(".")
+    if len(labels) != 2 or len(labels[0]) < 3:
+        return None
+    lead = re.compile(rf"^(?:why\s+)?({re.escape(labels[0])})(?=\s|['’])", re.I)
+    for excerpt in excerpts:
+        match = lead.match(excerpt)
+        if match:
+            return match.group(1)
+    return None
+
+
 def _bounded_phrase(value: str, words: int) -> str:
     # Search receives short text phrases, never page URLs, operators, or raw excerpts.
     return " ".join(word[:32] for word in _WORD.findall(_compact(value))[:words])
@@ -176,7 +189,7 @@ def _sources(
         overlap = terms & _terms(title + " " + " ".join(excerpts))
         if not excerpts or len(overlap) < min(2, len(terms)):
             continue
-        company = _company_name(title, host)
+        company = _company_name(title, host) or _company_from_excerpt(host, excerpts)
         ranked.append((bool(company), len(overlap), CompetitorSource(url, title, excerpts, company)))
 
     ranked.sort(key=lambda item: item[:2], reverse=True)
@@ -257,6 +270,29 @@ async def discover_competitors(
 
 def _mentions(name: str, text: str) -> bool:
     return bool(re.search(r"(?<!\w)" + re.escape(_compact(name)) + r"(?!\w)", text, re.I))
+
+
+def supported_competitors(sources: tuple[CompetitorSource, ...]) -> list[Competitor]:
+    competitors = []
+    for source in sources:
+        name = source.company_name
+        if not name:
+            continue
+        citations = [
+            Evidence(url=source.url, excerpt=excerpt)
+            for excerpt in source.excerpts
+            if _mentions(name, excerpt) or _FIRST_PERSON_COMPANY.match(excerpt)
+        ]
+        if not citations:
+            continue
+        candidate = Competitor(
+            name=name, main_offerings=[], strengths=[], gaps=[], evidence_status="potential",
+            sources=citations,
+        )
+        grounded = ground_researched_competitor(candidate, (source,))
+        if grounded and grounded.evidence_status == "sourced":
+            competitors.append(grounded)
+    return competitors
 
 
 def ground_researched_competitor(

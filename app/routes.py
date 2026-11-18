@@ -30,10 +30,12 @@ async def health() -> HealthResponse:
 
 @router.post(
     "/link-analysis",
+    response_model_exclude_none=True,
     summary="Analyze a website",
     description=(
         "Fetch a public HTTP or HTTPS website and return its brand profile and five "
-        "analysis sections. The website field identifies the final page after redirects."
+        "analysis sections. The website field identifies the final page after redirects. "
+        "Optional fields are omitted when their values are unavailable."
     ),
     responses={
         408: {"model": LinkAnalysisErrorResponse, "description": "Timed out reading the request body."},
