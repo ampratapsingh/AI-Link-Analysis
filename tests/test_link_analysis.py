@@ -276,7 +276,7 @@ async def test_external_competitor_research_uses_one_llm_call_and_degrades_grace
     assert len(result.analysis.target_search_queries) == 5
     competitors = result.analysis.competitor_analysis.competitors
     if search_status == 200:
-        assert calls == ["search", "llm"]
+        assert calls == ["search", "search", "llm"]
         assert result.analysis.competitor_analysis.research_status == "search_snippets"
         assert {str(competitor.website) for competitor in competitors} == sources.keys()
         for competitor in competitors:
@@ -539,6 +539,37 @@ async def test_claude_fallback_keeps_five_cited_services_and_includes_primary_ke
     assert result.analysis.seo_improvements.recommended_title == "Northwind IT Services | managed IT"
     assert "Omitted invalid Claude service candidates count=1" in caplog.text
     assert len(requests) == 2
+
+
+async def test_service_fields_use_industry_cues_and_keep_claim_qualifiers(
+    client, mock_website, mock_openai, api_response, analysis
+):
+    store = "Build an online store with guided setup and customizable templates."
+    checkout = "Checkout converts up to 50% higher than guest checkout in our study."
+    funding = "Capital offers financing to help merchants grow their inventory."
+    html = b"<title>Northwind IT</title>" + "".join(
+        f"<p>{excerpt}</p>" for excerpt in (store, checkout, funding)
+    ).encode()
+    mock_website(lambda _: website_response(html))
+    template, = analysis["analysis"]["top_services"]
+    analysis["analysis"]["top_services"] = [
+        {**template, "name": name, "description": excerpt, "main_benefit": benefit,
+         "sources": [{"url": URL, "excerpt": excerpt}]}
+        for name, excerpt, benefit in (
+            ("Store builder", store, "Guided setup"),
+            ("Checkout", checkout, "Higher conversion rates"),
+            ("Capital", funding, "Access to financing with no equity taken"),
+        )
+    ]
+    mock_openai(lambda _: api_response(text=json.dumps(analysis)))
+
+    response = await client.post("/link-analysis", json={"url": URL})
+
+    assert response.status_code == 200
+    store_service, checkout_service, financing_service = response.json()["analysis"]["top_services"]
+    assert store_service["target_industry"] == "E-commerce"
+    assert checkout_service["main_benefit"] == f"Website claim: {checkout}"
+    assert "main_benefit" not in financing_service
 
 
 @pytest.mark.parametrize(("upstream", "code"), [(429, "llm_rate_limited"), (503, "llm_provider_error")])

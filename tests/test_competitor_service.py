@@ -238,7 +238,8 @@ async def test_search_stops_when_three_attributed_candidates_fit(
         hit(
             f"https://{name.lower()}.example/cloud",
             f"{name} | Cloud Hosting",
-            f"{name} offers managed cloud hosting and Kubernetes migration.",
+            f"{name} provides 24/7 support for managed cloud hosting. "
+            f"{name} does not provide on-premises cloud hosting.",
         )
         for name in ("Contoso", "Fabrikam", "Adatum")
     ]
@@ -255,6 +256,44 @@ async def test_search_stops_when_three_attributed_candidates_fit(
     assert research.status == "search_snippets"
     assert {source.company_name for source in research.sources} == {"Contoso", "Fabrikam", "Adatum"}
     assert len(calls) == expected_calls
+
+
+async def test_shopify_roundup_does_not_credit_publishers_and_retains_wix_capability():
+    from pydantic import HttpUrl
+    from app.services.competitor_service import CompetitorSource
+
+    wix = "Why Wix Studio is an alternative to Shopify: Wix Studio offers design flexibility and technical depth that Shopify can't match."
+    roundup = "Alternatives like WooCommerce, Wix, and BigCommerce can be more affordable."
+    sources = (
+        CompetitorSource(HttpUrl("https://www.wix.com/blog/shopify-alternatives"), "Wix roundup", (wix,), "Wix"),
+        CompetitorSource(HttpUrl("https://www.willshall.com/blog/alternatives"), "WillShall roundup", (roundup,), "WillShall"),
+    )
+    candidate = Competitor(
+        name="WillShall", main_offerings=[], strengths=[], gaps=[], evidence_status="potential",
+        sources=[{"url": sources[1].url, "excerpt": roundup}],
+    )
+    assert ground_researched_competitor(candidate, sources) is None
+    wix_candidate, = supported_competitors(sources)
+    assert wix_candidate.strengths == ["Wix Studio offers design flexibility and technical depth"]
+    assert wix_candidate.gaps == []
+    assert wix_candidate.sources[0].excerpt == wix
+
+
+async def test_strength_and_gap_on_separate_company_pages_both_survive(
+    mock_search, business_page, search_settings
+):
+    limits_url = "https://contoso.example/plans"
+    strength = "Contoso provides 24/7 technical support on managed cloud hosting."
+    mock_search(lambda _: httpx.Response(200, json={
+        "results": [hit(snippet=strength), hit(limits_url, snippet=f"{OVERVIEW} {LIMITATION}")],
+    }))
+
+    research = await discover_competitors(business_page, search_settings)
+    competitor, = supported_competitors(research.sources)
+
+    assert competitor.strengths == [strength]
+    assert competitor.gaps == [LIMITATION]
+    assert {str(source.url) for source in competitor.sources} == {COMPANY_URL, limits_url}
 
 
 async def test_claims_require_complete_company_excerpts_and_matching_urls(

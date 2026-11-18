@@ -242,6 +242,8 @@ If Claude stops at its output token limit, the API returns `llm_output_truncated
 
 The model can propose up to eight service candidates. The API removes duplicates and services with invalid evidence, then returns up to five, prioritizing those backed by the website. The response includes all five analysis sections even when no services qualify. The Claude JSON fallback can discard a malformed service candidate and validate the remaining candidates without another provider request.
 
+Service-level industries can be filled in from explicit evidence in their citations. For checked figures, financial terms, and comparative benefits, the API uses the cited wording so qualifications stay attached to the claim.
+
 Optional fields with unavailable values are omitted from successful responses. Empty lists are included so clients can tell when a section has no verified entries.
 
 ### Model comparison and estimated cost
@@ -256,7 +258,7 @@ Optional fields with unavailable values are omitted from successful responses. E
 
 ## Optional competitor research
 
-Tavily receives up to two short searches based on the submitted site's title, headings, and service descriptions. The second search is skipped when the first yields relevant, attributable snippets for three distinct companies that fit the model's evidence budget. The application favors results whose company name matches the source domain and filters self-matches, duplicates, and results without relevant business terms. It sends snippets as untrusted data within the existing LLM content budget. The app uses the search response as evidence and does not fetch the full competitor pages. [Tavily Search API](https://docs.tavily.com/documentation/api-reference/endpoint/search)
+Tavily receives up to two short searches based on the submitted site's title, headings, and service descriptions. The second looks for features, plan limits, and availability. The app skips it when the first search already supplies attributable strengths and gaps for three distinct companies within the evidence budget. Roundups can establish leads for the companies they name. A roundup publisher needs its own supporting evidence to qualify. [Tavily Search API](https://docs.tavily.com/documentation/api-reference/endpoint/search)
 
 | Setting | Default |
 | --- | --- |
@@ -267,7 +269,7 @@ Tavily receives up to two short searches based on the submitted site's title, he
 
 The API reports the search outcome in `analysis.competitor_analysis.research_status`. `search_snippets` means snippets were supplied to the model. `not_configured`, `unavailable`, `no_relevant_results`, and `insufficient_budget` indicate why the request used page-only evidence. A timeout, rate limit, or malformed search response falls back to page-only evidence unless earlier search results are usable.
 
-A `sourced` competitor has claims matched verbatim to a cited snippet attributed to that business. An unsupported claim is removed. A `potential` competitor has a citation but too little evidence for a factual comparison. An `ai_suggestion` is an unverified candidate named on the submitted site. Domain and relevance checks are heuristic, and snippet citations do not verify the source's underlying claims.
+A `sourced` competitor has claims matched to cited excerpts attributed to that business. A strength and a gap can come from separate pages, with both URLs preserved. A positioning suggestion can ask the submitted brand to explain whether it addresses a cited competitor limit. A `potential` competitor has a citation but too little evidence for a factual comparison. An `ai_suggestion` is an unverified candidate named on the submitted site. Domain and relevance checks are heuristic, and company snippets represent the company's published claims.
 
 To exercise search, set `SEARCH_PROVIDER=tavily` and add `SEARCH_API_KEY` and the selected model provider's key to your local `.env`. Restart and run the [manual end-to-end check](#manual-end-to-end-check) with a public business website. Inspect the research status, competitor evidence labels, and each source URL and excerpt. Repeat with `SEARCH_PROVIDER=none` to check page-only fallback. Enabled research can use two Tavily basic-search credits per analysis, up to $0.016 at the documented pay-as-you-go rate, plus model usage. [Tavily credits and pricing](https://docs.tavily.com/documentation/api-credits)
 

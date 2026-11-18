@@ -22,13 +22,15 @@ _GENERIC_TERMS = set(
     "the their this website what with world your".split()
 )
 _LIMITATION = re.compile(
-    r"\b(?:(?:does not|do not) (?:offer|support|provide|include|ship|deliver|serve)"
-    r"|not available|unavailable|limited to|only available|available only|only supports?)\b",
+    r"\b(?:(?:does not|do not|doesn['’]t|don['’]t) (?:offer|support|provide|include|ship|deliver|serve)"
+    r"|not available|unavailable|limited to|only available|available only|only supports?"
+    r"|requires? (?:an? )?(?:paid|premium|enterprise) plan)\b",
     re.I,
 )
 _EXPLICIT_STRENGTH = re.compile(
     r"^(?:offers?|provides?|includes?) (?:(?:24/7|round-the-clock|around-the-clock) "
-    r"(?:(?:customer|technical|live) )?support|free (?:trials?|shipping|migration|support))\b",
+    r"(?:(?:customer|technical|live) )?support|free (?:trials?|shipping|migration|support)"
+    r"|(?:customi[sz]able|flexible) (?:templates?|designs?)|design flexibility)\b",
     re.I,
 )
 _FIRST_PERSON_COMPANY = re.compile(r"^(?:we|our)\b", re.I)
@@ -157,7 +159,7 @@ def _search_queries(page: ExtractionResult, host: str) -> tuple[list[str], set[s
     brand_label = _bounded_phrase(brand, 6)
     queries = [
         f'"{brand_label}" alternatives {offering}',
-        f"{offering} providers {category}".strip(),
+        f"{offering} providers {category} features plan limits availability".strip(),
     ]
     terms = set().union(*(_terms(item) for item in descriptors)) - _terms(brand)
     return [query if len(query) <= 300 else query[:301].rsplit(" ", 1)[0] for query in queries], terms
@@ -190,20 +192,35 @@ def _sources(
         if not excerpts or len(overlap) < min(2, len(terms)):
             continue
         company = _company_name(title, host) or _company_from_excerpt(host, excerpts)
-        ranked.append((bool(company), len(overlap), CompetitorSource(url, title, excerpts, company)))
+        source = CompetitorSource(url, title, excerpts, company)
+        comparisons = supported_competitors((source,))
+        facets = frozenset(
+            field for comparison in comparisons for field in ("strengths", "gaps")
+            if getattr(comparison, field)
+        )
+        ranked.append((len(facets), bool(company), len(overlap), source, facets))
 
-    ranked.sort(key=lambda item: item[:2], reverse=True)
+    ranked.sort(key=lambda item: item[:3], reverse=True)
     sources = []
-    hosts = []
-    for _, _, source in ranked:
+    primary = []
+    complementary = []
+    for _, _, _, source, facets in ranked:
         host = source.url.host or ""
-        if any(_same_site(host, previous) for previous in hosts):
+        previous = next((entry for entry in primary if _same_site(host, entry[0])), None)
+        if previous:
+            _, first, first_facets = previous
+            if (
+                source.url != first.url and source.company_name and first.company_name
+                and _name_key(source.company_name) == _name_key(first.company_name)
+                and facets - first_facets
+            ):
+                complementary.append(source)
             continue
         sources.append(source)
-        hosts.append(host)
+        primary.append((host, source, facets))
         if len(sources) == limit:
             break
-    return tuple(sources)
+    return tuple((sources + complementary)[:limit])
 
 
 async def discover_competitors(
@@ -240,15 +257,8 @@ async def discover_competitors(
                 evidence = _sources(hits, host, terms, settings.search_max_results)
                 if completed < len(queries) and len(evidence) >= 3:
                     _, fitted = CompetitorResearch("search_snippets", evidence).fit_prompt(prompt_budget)
-                    companies = {
-                        _name_key(source.company_name)
-                        for source in fitted.sources
-                        if source.company_name and any(
-                            _mentions(source.company_name, excerpt) or _FIRST_PERSON_COMPANY.match(excerpt)
-                            for excerpt in source.excerpts
-                        )
-                    }
-                    if len(companies) >= 3:
+                    compared = supported_competitors(fitted.sources)
+                    if len({_name_key(item.name) for item in compared if item.strengths and item.gaps}) >= 3:
                         break
     except SearchError as exc:
         failed = True
@@ -291,7 +301,17 @@ def supported_competitors(sources: tuple[CompetitorSource, ...]) -> list[Competi
         )
         grounded = ground_researched_competitor(candidate, (source,))
         if grounded and grounded.evidence_status == "sourced":
-            competitors.append(grounded)
+            existing = next((
+                item for item in competitors
+                if _name_key(item.name) == _name_key(grounded.name)
+                and _same_site(item.website.host or "", source.url.host or "")
+            ), None)
+            if existing is None:
+                competitors.append(grounded)
+            else:
+                existing.strengths = list(dict.fromkeys(existing.strengths + grounded.strengths))
+                existing.gaps = list(dict.fromkeys(existing.gaps + grounded.gaps))
+                existing.sources.extend(item for item in grounded.sources if item not in existing.sources)
     return competitors
 
 
@@ -300,6 +320,23 @@ def ground_researched_competitor(
 ) -> Competitor | None:
     if not _compact(competitor.name):
         return None
+    company = re.escape(_compact(competitor.name))
+    claim_pattern = re.compile(
+        rf"^(?:(?:{company}|we)\s+|(?:{company}['’]s|our)\s+"
+        r"(?:[\w-]+\s+){0,4}(?:plans?|services?|products?|platform|support|shipping|features?)\s+)"
+        r"(?:(?:is|are)\s+)?(.+)",
+        re.I,
+    )
+    heading_pattern = re.compile(rf"^why\s+{company}\b[^:]*:\s*", re.I)
+    product_prefix = re.compile(r"^(?:[A-Z][\w-]*\s+){1,3}(?=(?:offers?|provides?|includes?|requires?)\s)")
+
+    def company_statement(excerpt: str) -> tuple[str, str] | None:
+        statement = heading_pattern.sub("", excerpt)
+        match = claim_pattern.match(statement)
+        if match:
+            return statement, product_prefix.sub("", match.group(1))
+        return None
+
     citations = []
     company_citations = []
     website = None
@@ -310,26 +347,17 @@ def ground_researched_competitor(
             name_matches = bool(source.company_name) and (
                 _name_key(source.company_name or "") == _name_key(competitor.name)
             )
-            if name_matches or _mentions(competitor.name, citation.excerpt):
+            direct = name_matches and company_statement(_compact(citation.excerpt))
+            if direct or _mentions(competitor.name, citation.excerpt):
                 evidence = Evidence(url=source.url, excerpt=_compact(citation.excerpt))
                 if evidence not in citations:
                     citations.append(evidence)
-                if name_matches and (
-                    _mentions(competitor.name, evidence.excerpt)
-                    or _FIRST_PERSON_COMPANY.match(evidence.excerpt)
-                ):
+                if direct:
                     website = source.url
                     company_citations.append(evidence)
     if not citations:
         return None
 
-    company = re.escape(_compact(competitor.name))
-    claim_pattern = re.compile(
-        rf"^(?:(?:{company}|we)\s+|(?:{company}['’]s|our)\s+"
-        r"(?:[\w-]+\s+){0,4}(?:plans?|services?|products?|platform|support|shipping|features?)\s+)"
-        r"(?:(?:is|are)\s+)?(.+)",
-        re.I,
-    )
     quotes = {item.excerpt for item in company_citations}
 
     def sourced(value: str | None) -> str | None:
@@ -337,18 +365,21 @@ def ground_researched_competitor(
         return clean if clean in quotes else None
 
     def is_gap(excerpt: str) -> bool:
-        match = claim_pattern.match(excerpt)
-        return bool(match and _LIMITATION.match(match.group(1)))
+        direct = company_statement(excerpt)
+        return bool(direct and _LIMITATION.match(direct[1]))
+
+    def strength_text(statement: str) -> str:
+        return re.split(r"\s+that\s+[^.!?]+?\s+(?:can['’]t|cannot) match\b", statement, maxsplit=1)[0]
 
     facts = {
         "business_overview": sourced(competitor.business_overview),
         "category": sourced(competitor.category),
         "target_market": sourced(competitor.target_market),
         "main_offerings": list(dict.fromkeys(filter(None, map(sourced, competitor.main_offerings)))),
-        "strengths": [
-            quote for quote in dict.fromkeys(map(sourced, competitor.strengths))
-            if quote and claim_pattern.match(quote) and not is_gap(quote)
-        ],
+        "strengths": list(dict.fromkeys(
+            strength_text(heading_pattern.sub("", quote)) for quote in map(sourced, competitor.strengths)
+            if quote and not is_gap(quote)
+        )),
         "gaps": [
             quote for quote in dict.fromkeys(map(sourced, competitor.gaps))
             if quote and is_gap(quote)
@@ -366,18 +397,20 @@ def ground_researched_competitor(
         if source.url not in company_urls or _name_key(source.company_name or "") != _name_key(competitor.name):
             continue
         for excerpt in source.excerpts:
-            match = claim_pattern.match(excerpt)
-            if match is None:
+            direct = company_statement(excerpt)
+            if direct is None:
                 continue
-            claim = match.group(1)
+            statement, claim = direct
             if _LIMITATION.match(claim):
                 field = "gaps"
             elif _EXPLICIT_STRENGTH.match(claim):
                 field = "strengths"
+                # Keep the capability while leaving the publisher's rival comparison in the citation.
+                statement = strength_text(statement)
             else:
                 continue
-            if excerpt not in facts[field]:
-                facts[field].append(excerpt)
+            if statement not in facts[field]:
+                facts[field].append(statement)
             evidence = Evidence(url=source.url, excerpt=excerpt)
             if evidence not in citations:
                 citations.append(evidence)

@@ -57,8 +57,9 @@ you cannot verify, and state material evidence limitations in the brand summary.
   explicitly named on the submitted page, with all other fields null or empty. Identify at
   least three competitors when reliable evidence supports them. Leave research_status null
   for the application to set.
-  Suggest positioning opportunities for the submitted brand. Treat third-party lists as
-  discovery leads and avoid asserting comparative price or performance without direct evidence.
+  Tie positioning suggestions to a cited competitor strength or gap when one is available.
+  Explain the practical implication for a buyer and avoid asserting an advantage unless
+  the submitted page also supports it. Treat third-party lists as discovery leads.
 - Generate exactly five distinct search queries. For each, provide suitable platforms, intent,
   business relevance, and target audience. Use only the schema's platform values.
 - Recommend specific, actionable SEO keywords, an SEO title, a meta description, and
@@ -74,8 +75,10 @@ you cannot verify, and state material evidence limitations in the brand summary.
   it. Do not paraphrase or combine excerpts. Omit website services without supporting evidence.
   Use inferred only for a clearly labeled recommendation, never for an unverified existing
   offering. Links are labels from the submitted page and do not establish linked-page facts.
-  Fill in target industry, target customer, and main benefit when supported. Do not invent
-  services or pad the list.
+  Identify the target industry when a cited excerpt names it or explicitly describes who
+  the service is for. Cite separate excerpts for separate claims. For figures, comparisons,
+  and financing terms, cite the exact claim and retain its qualifiers in the benefit.
+  Do not invent services or pad the list.
 - Describe likely primary and secondary customers, industries, customer needs and challenges,
   interests, and concrete marketing segments. Use geography only when supported by the page.
 
@@ -87,6 +90,17 @@ _BUSINESS_TERMS = re.compile(
     re.IGNORECASE,
 )
 _EXCERPT_LIMITS = {"text": 700, "meta_description": 300}
+_INDUSTRY_CUES = (
+    ("E-commerce", re.compile(r"\b(?:e[ -]?commerce|online stores?)\b", re.I)),
+    ("Retail", re.compile(r"\b(?:retailers?|retail businesses|retail stores?)\b", re.I)),
+)
+_SERVICE_CLAIM_PATTERNS = tuple(re.compile(pattern, re.I) for pattern in (
+    r"\b(?:no equity|without (?:giving up|taking|selling) equity|zero equity)\b",
+    r"\b(?:higher conversion|convert\w* [^.!?]{0,70}\bhigher)\b",
+    r"\b(?:faster|cheaper|more affordable|more affordably)\b",
+    r"\b(?:free|guarantee[ds]?)\b",
+))
+_SERVICE_FIGURE = re.compile(r"\$[\d,.]+(?:\s?[KMkmbB])?|\d+(?:\.\d+)?\s*%")
 
 
 @dataclass(frozen=True)
@@ -98,6 +112,20 @@ class PreparedWebsite:
 
 def _compact(value: str) -> str:
     return " ".join(value.split())
+
+
+def _verified_service_claim(claim: str, excerpts: tuple[str, ...]) -> str | None:
+    markers = [pattern for pattern in _SERVICE_CLAIM_PATTERNS if pattern.search(claim)]
+    figures = {_compact(value).replace(" ", "").casefold() for value in _SERVICE_FIGURE.findall(claim)}
+    if not markers and not figures:
+        return claim
+    for excerpt in excerpts:
+        excerpt_figures = {
+            _compact(value).replace(" ", "").casefold() for value in _SERVICE_FIGURE.findall(excerpt)
+        }
+        if figures <= excerpt_figures and all(pattern.search(excerpt) for pattern in markers):
+            return f"Website claim: {excerpt}"
+    return None
 
 
 def _clip(text: str, limit: int) -> str:
@@ -342,13 +370,33 @@ def _validate_grounding(
     for competitor in supported_competitors(research.sources):
         key = re.sub(r"[\W_]", "", competitor.name.casefold())
         existing = competitors.get(key)
-        if key == brand_key or (existing and existing.evidence_status == "sourced"):
+        if key == brand_key:
+            continue
+        if existing and existing.evidence_status == "sourced":
+            if existing.website and competitor.website and (
+                existing.website.host.removeprefix("www.") == competitor.website.host.removeprefix("www.")
+            ):
+                existing.strengths = list(dict.fromkeys(existing.strengths + competitor.strengths))
+                existing.gaps = list(dict.fromkeys(existing.gaps + competitor.gaps))
+                existing.sources.extend(source for source in competitor.sources if source not in existing.sources)
             continue
         if existing:
             competitor.sources.extend(source for source in existing.sources if source not in competitor.sources)
         competitors[key] = competitor
     comparison.competitors = list(competitors.values())
     comparison.research_status = research.status
+    page_terms = {word.casefold() for word in re.findall(r"\b[a-zA-Z]{5,}\b", page_evidence)}
+    for competitor in comparison.competitors:
+        relevant_gap = next((
+            gap for gap in competitor.gaps
+            if len(page_terms & set(re.findall(r"\b[a-z]{5,}\b", gap.casefold()))) >= 2
+        ), None)
+        if relevant_gap:
+            comparison.opportunities.append(
+                f"Suggestion: State whether your offering addresses this "
+                f"{competitor.name} limitation: “{relevant_gap}”"
+            )
+            break
 
     grounded_services = {}
     missing_sources = invalid_sources = 0
@@ -366,6 +414,23 @@ def _validate_grounding(
                 invalid_sources += 1
                 break
         else:
+            if service.evidence_status == "website":
+                excerpts = tuple(_compact(source.excerpt) for source in service.sources)
+                industry_candidates = [service.target_industry, *result.analysis.target_audience.industries]
+                service.target_industry = next((
+                    industry for industry in industry_candidates
+                    if industry and any(re.search(
+                        r"(?<!\w)" + re.escape(_compact(industry)) + r"(?!\w)", excerpt, re.I
+                    ) for excerpt in excerpts)
+                ), None)
+                if service.target_industry is None:
+                    service.target_industry = next((
+                        industry for industry, cue in _INDUSTRY_CUES
+                        if any(cue.search(excerpt) for excerpt in excerpts)
+                    ), None)
+                if service.main_benefit:
+                    service.main_benefit = _verified_service_claim(service.main_benefit, excerpts)
+                service.description = _verified_service_claim(service.description, excerpts) or excerpts[0]
             key = _compact(service.name).casefold()
             if key and (key not in grounded_services or grounded_services[key].evidence_status == "inferred"):
                 grounded_services[key] = service
