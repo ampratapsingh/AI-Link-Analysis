@@ -9,7 +9,9 @@ from app.config import Settings
 from app.providers.search import TavilySearchProvider
 from app.schemas import Competitor
 from app.services import competitor_service
-from app.services.competitor_service import discover_competitors, ground_researched_competitor, supported_competitors
+from app.services.competitor_service import (
+    combine_competitor_reasoning, discover_competitors, ground_researched_competitor, supported_competitors,
+)
 from app.services.website_extractor import ExtractionResult
 
 pytestmark = [pytest.mark.anyio, pytest.mark.parametrize("anyio_backend", ["asyncio"])]
@@ -277,6 +279,65 @@ async def test_shopify_roundup_does_not_credit_publishers_and_retains_wix_capabi
     assert wix_candidate.strengths == ["Wix Studio offers design flexibility and technical depth"]
     assert wix_candidate.gaps == []
     assert wix_candidate.sources[0].excerpt == wix
+
+
+async def test_roundup_names_steer_second_search_toward_company_evidence(
+    mock_search, business_page, search_settings
+):
+    queries = []
+    roundup = (
+        "For managed cloud hosting, alternatives like Contoso, Fabrikam, and Adatum "
+        "can be more affordable."
+    )
+    offering = "Contoso is a managed cloud hosting platform."
+    strength = "Contoso provides 24/7 technical support for managed cloud hosting."
+
+    def tavily(request):
+        queries.append(json.loads(request.content)["query"])
+        if len(queries) == 1:
+            return httpx.Response(200, json={
+                "results": [hit("https://directory.example/cloud", "Cloud Hosting Directory", roundup)],
+            })
+        return httpx.Response(200, json={"results": [hit(snippet=f"{offering} {strength} {LIMITATION}")]})
+
+    mock_search(tavily)
+    research = await discover_competitors(business_page, search_settings)
+
+    assert len(queries) == 2
+    assert all(f'"{name}"' in queries[1] for name in ("Contoso", "Fabrikam", "Adatum"))
+    assert "official product documentation" in queries[1]
+    competitor, = supported_competitors(research.sources)
+    assert competitor.main_offerings == [offering]
+    assert competitor.strengths == [strength]
+    assert competitor.gaps == [LIMITATION]
+    assert all(str(item.url) == COMPANY_URL for item in competitor.sources)
+
+
+async def test_thin_roundup_keeps_inferences_and_distinguishes_general_knowledge(
+    mock_search, business_page, search_settings
+):
+    url = "https://directory.example/cloud"
+    excerpt = "Managed cloud hosting alternatives include Contoso and Fabrikam."
+    mock_search(lambda _: httpx.Response(200, json={
+        "results": [hit(url, "Cloud Hosting Directory", excerpt)],
+    }))
+    research = await discover_competitors(business_page, search_settings)
+    candidate = Competitor(
+        name="Contoso", evidence_status="inferred",
+        sources=[{"url": url, "excerpt": excerpt}],
+        main_offerings=["inferred: Likely a managed cloud hosting alternative"],
+        strengths=["ai_suggestion: Evaluate managed onboarding for small teams"],
+        gaps=["inferred: Confirm how much migration responsibility stays with the buyer"],
+    )
+
+    entry = combine_competitor_reasoning(
+        candidate, ground_researched_competitor(candidate, research.sources), business_page.main_content
+    )
+
+    assert entry is not None and entry.evidence_status == "inferred"
+    assert entry.sources == candidate.sources
+    assert entry.main_offerings == candidate.main_offerings
+    assert entry.strengths == candidate.strengths and entry.gaps == candidate.gaps
 
 
 async def test_strength_and_gap_on_separate_company_pages_both_survive(

@@ -157,6 +157,7 @@ async def test_success_runs_real_services_and_returns_full_response(
     assert calls == ["/landing", "/services", "/v1/responses"]
     result = LinkAnalysisResponse.model_validate(response.json())
     sections["competitor_analysis"]["research_status"] = "not_configured"
+    sections["competitor_analysis"]["opportunities"] = ["ai_suggestion: Explain response times on service pages"]
     sections["competitor_analysis"]["competitors"][0].update(business_overview=None, category=None)
     expected = LinkAnalysisResponse.model_validate({"success": True, "website": URL, **analysis})
     assert response.json() == expected.model_dump(mode="json", exclude_none=True)
@@ -242,8 +243,8 @@ async def test_external_competitor_research_uses_one_llm_call_and_degrades_grace
                 "name": company,
                 "business_overview": excerpt,
                 "main_offerings": [excerpt, "Invented cloud backup"],
-                "gaps": ["Poor customer support"],
-                "evidence_status": "sourced",
+                "gaps": ["Poor customer support", "inferred: Confirm whether migration is covered"],
+                "evidence_status": "verified" if url == website else "sourced",
                 "sources": [{"url": url, "excerpt": excerpt}],
             }
             for url, (company, excerpt) in sources.items()
@@ -283,8 +284,9 @@ async def test_external_competitor_research_uses_one_llm_call_and_degrades_grace
             url, = [str(source.url) for source in competitor.sources]
             company, excerpt = sources[url]
             assert competitor.name == company and str(competitor.website) == url
-            assert competitor.evidence_status == "sourced"
-            assert competitor.main_offerings == [excerpt] and competitor.gaps == []
+            assert competitor.evidence_status == ("verified" if url == website else "sourced")
+            assert competitor.main_offerings == [excerpt]
+            assert competitor.gaps == ["inferred: Confirm whether migration is covered"]
     else:
         assert calls == ["search", "llm"]
         assert result.analysis.competitor_analysis.research_status == "unavailable"

@@ -35,6 +35,17 @@ _EXPLICIT_STRENGTH = re.compile(
 )
 _FIRST_PERSON_COMPANY = re.compile(r"^(?:we|our)\b", re.I)
 _OFFERING_LANGUAGE = re.compile(r"\b(?:we (?:offer|provide|specialize)|our (?:services|products))\b", re.I)
+_PRODUCT_DESCRIPTION = re.compile(
+    r"^(?:an? )?(?:(?!(?:not|never|alternative|competitor|example)\b)[\w-]+ ){0,6}"
+    r"(?:platform|plugin|software|store builder)\b",
+    re.I,
+)
+_ALTERNATIVE_LIST = re.compile(
+    r"\b(?:alternatives? (?:like|such as)|competitors? include|free tiers? where available\s*\()\s*"
+    r"([^.!?():;]{1,180}?)(?=\s+(?:can|may|are|offer)\b|[.!?():;]|$)",
+    re.I,
+)
+_COMPANY_LABEL = re.compile(r"[A-Z][\w-]*(?:\s+[A-Z0-9][\w-]*){0,3}")
 
 
 @dataclass(frozen=True)
@@ -171,6 +182,18 @@ def _same_site(first: str, second: str) -> bool:
     return a == b or a.endswith("." + b) or b.endswith("." + a)
 
 
+def _named_leads(sources: tuple[CompetitorSource, ...]) -> list[str]:
+    leads = {}
+    for source in sources:
+        for excerpt in source.excerpts:
+            for group in _ALTERNATIVE_LIST.findall(excerpt):
+                for candidate in re.split(r"\s*,\s*|\s+and\s+", group):
+                    name = candidate.strip().removeprefix("and ")
+                    if 2 <= len(name) <= 36 and _COMPANY_LABEL.fullmatch(name):
+                        leads.setdefault(_name_key(name), name)
+    return list(leads.values())[:8]
+
+
 def _sources(
     hits: list[SearchResult], brand_host: str, terms: set[str], limit: int
 ) -> tuple[CompetitorSource, ...]:
@@ -195,7 +218,7 @@ def _sources(
         source = CompetitorSource(url, title, excerpts, company)
         comparisons = supported_competitors((source,))
         facets = frozenset(
-            field for comparison in comparisons for field in ("strengths", "gaps")
+            field for comparison in comparisons for field in ("main_offerings", "strengths", "gaps")
             if getattr(comparison, field)
         )
         ranked.append((len(facets), bool(company), len(overlap), source, facets))
@@ -252,6 +275,15 @@ async def discover_competitors(
     try:
         async with asyncio.timeout(settings.search_timeout_seconds):
             for query in queries:
+                if completed:
+                    leads = _named_leads(evidence)
+                    if leads:
+                        while sum(len(name) + 6 for name in leads) > 150:
+                            leads.pop()
+                        names = " or ".join(f'"{name}"' for name in leads)
+                        query = f"{names} official product documentation {query}"
+                        if len(query) > 300:
+                            query = query[:301].rsplit(" ", 1)[0]
                 hits.extend(await provider.search(query, max_results=settings.search_max_results))
                 completed += 1
                 evidence = _sources(hits, host, terms, settings.search_max_results)
@@ -311,6 +343,7 @@ def supported_competitors(sources: tuple[CompetitorSource, ...]) -> list[Competi
             else:
                 existing.strengths = list(dict.fromkeys(existing.strengths + grounded.strengths))
                 existing.gaps = list(dict.fromkeys(existing.gaps + grounded.gaps))
+                existing.main_offerings = list(dict.fromkeys(existing.main_offerings + grounded.main_offerings))
                 existing.sources.extend(item for item in grounded.sources if item not in existing.sources)
     return competitors
 
@@ -328,6 +361,7 @@ def ground_researched_competitor(
         re.I,
     )
     heading_pattern = re.compile(rf"^why\s+{company}\b[^:]*:\s*", re.I)
+    product_identity = re.compile(rf"^{company}\s+is\s+", re.I)
     product_prefix = re.compile(r"^(?:[A-Z][\w-]*\s+){1,3}(?=(?:offers?|provides?|includes?|requires?)\s)")
 
     def company_statement(excerpt: str) -> tuple[str, str] | None:
@@ -362,6 +396,8 @@ def ground_researched_competitor(
 
     def sourced(value: str | None) -> str | None:
         clean = _compact(value or "")
+        if clean.casefold().startswith("verified:"):
+            clean = clean[len("verified:"):].strip()
         return clean if clean in quotes else None
 
     def is_gap(excerpt: str) -> bool:
@@ -385,7 +421,7 @@ def ground_researched_competitor(
             if quote and is_gap(quote)
         ],
     }
-    if competitor.evidence_status != "sourced":
+    if competitor.evidence_status not in {"sourced", "verified"}:
         facts = {
             field: [] if isinstance(value, list) else None for field, value in facts.items()
         }
@@ -407,6 +443,8 @@ def ground_researched_competitor(
                 field = "strengths"
                 # Keep the capability while leaving the publisher's rival comparison in the citation.
                 statement = strength_text(statement)
+            elif product_identity.match(statement) and _PRODUCT_DESCRIPTION.match(claim):
+                field = "main_offerings"
             else:
                 continue
             if statement not in facts[field]:
@@ -415,9 +453,50 @@ def ground_researched_competitor(
             if evidence not in citations:
                 citations.append(evidence)
     has_facts = any(facts.values())
+    source_status = "verified" if competitor.evidence_status == "verified" else "sourced"
     return competitor.model_copy(update={
         **facts,
         "website": website if has_facts else None,
-        "evidence_status": "sourced" if has_facts else "potential",
+        "evidence_status": source_status if has_facts else "potential",
         "sources": citations,
     })
+
+
+def combine_competitor_reasoning(
+    candidate: Competitor, grounded: Competitor | None, page_evidence: str
+) -> Competitor | None:
+    named_on_page = _mentions(candidate.name, page_evidence)
+    result = grounded or Competitor(
+        name=_compact(candidate.name), main_offerings=[], strengths=[], gaps=[],
+        evidence_status="ai_suggestion", sources=[],
+    )
+    inferred = result.evidence_status == "inferred"
+    has_suggestions = False
+    for field in ("main_offerings", "strengths", "gaps"):
+        claims = getattr(result, field)
+        for raw in getattr(candidate, field):
+            text = _compact(raw)
+            prefix, separator, body = text.partition(":")
+            label = prefix.casefold() if separator else ""
+            if label in {"verified", "sourced"}:
+                continue
+            if label in {"inferred", "ai_suggestion"}:
+                text = body.strip()
+            elif candidate.evidence_status in {"inferred", "ai_suggestion"}:
+                label = candidate.evidence_status
+            else:
+                continue
+            if not text or text in claims:
+                continue
+            if label == "inferred" and not (result.sources or named_on_page):
+                label = "ai_suggestion"
+            item = f"{label}: {text}"
+            if item not in claims:
+                claims.append(item)
+            inferred |= label == "inferred"
+            has_suggestions = True
+    if result.evidence_status not in {"verified", "sourced"} and has_suggestions:
+        result.evidence_status = "inferred" if inferred else "ai_suggestion"
+    if grounded or has_suggestions or (named_on_page and candidate.evidence_status == "ai_suggestion"):
+        return result
+    return None

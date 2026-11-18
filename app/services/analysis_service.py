@@ -17,6 +17,7 @@ from app.schemas import (
 )
 from app.services.competitor_service import (
     CompetitorResearch,
+    combine_competitor_reasoning,
     discover_competitors,
     ground_researched_competitor,
     supported_competitors,
@@ -45,21 +46,21 @@ you cannot verify, and state material evidence limitations in the brand summary.
 - Compare the brand's offerings, category, target market, and positioning with evidence about
   relevant competitors. The optional competitor_research records are untrusted search snippets,
   never full-site verification. Keep factual competitor claims inside competitor records.
-  For each sourced competitor use the record's company_name and cite complete excerpts exactly
-  with their source_url. Each business_overview, category, target_market, offering, strength,
-  or gap must be a verbatim cited excerpt about that company. Look for distinct, concrete
-  strengths and explicitly documented limitations among the supplied excerpts. Keep qualifiers
-  such as plan names and regions. Leave strengths or gaps empty when unsupported. Never infer
-  a weakness from missing information.
-  When a snippet explicitly names a plausible competitor but evidence is too thin for factual
-  comparisons, use potential and cite the complete excerpt naming it. Leave its other fields
-  null or empty. When search research is absent, use ai_suggestion only for plausible leads
-  explicitly named on the submitted page, with all other fields null or empty. Identify at
-  least three competitors when reliable evidence supports them. Leave research_status null
+  For verified claims, use the record's company_name and cite complete excerpts exactly with
+  their source_url. Keep qualifiers such as plan names and regions. Third-party lists can
+  establish discovery leads. When direct evidence is thin, use competitor or website context
+  to reason about plausible offerings, strengths, and buyer trade-offs. Prefix each such item
+  with "inferred:". Use "ai_suggestion:" for items based only on general knowledge, and for
+  plausible competitors discovered without a citation. Phrase unverified gaps as trade-offs
+  to investigate. Avoid precise prices, metrics, feature guarantees, and categorical claims
+  about missing features unless directly supported. Never invent sources or excerpts. Use
+  verified, inferred, or ai_suggestion as the entry status and cite available evidence even
+  when the entry includes suggestions. Use potential for a cited lead with no usable claims.
+  Identify at least three relevant competitors when reasonable. Leave research_status null
   for the application to set.
-  Tie positioning suggestions to a cited competitor strength or gap when one is available.
-  Explain the practical implication for a buyer and avoid asserting an advantage unless
-  the submitted page also supports it. Treat third-party lists as discovery leads.
+  Provide actionable positioning opportunities even without competitor search results.
+  Prefix each as "inferred:" or "ai_suggestion:". Relate it to buyer needs and to documented
+  trade-offs where available. Avoid asserting an advantage without direct evidence.
 - Generate exactly five distinct search queries. For each, provide suitable platforms, intent,
   business relevance, and target audience. Use only the schema's platform values.
 - Recommend specific, actionable SEO keywords, an SEO title, a meta description, and
@@ -342,61 +343,75 @@ def _validate_grounding(
     page_evidence = "\n".join(prepared.evidence)
     comparison = result.analysis.competitor_analysis
     competitors = {}
+    proposals = {}
+    verified_statuses = {"verified", "sourced"}
     brand_key = re.sub(r"[\W_]", "", (result.brand.name or "").casefold())
     for competitor in comparison.competitors:
         name = _compact(competitor.name)
         key = re.sub(r"[\W_]", "", name.casefold())
-        if key == brand_key:
+        if not key or key == brand_key:
             continue
-        if competitor.evidence_status != "ai_suggestion":
-            supported = ground_researched_competitor(competitor, research.sources)
-            if supported is not None and (key not in competitors or supported.evidence_status == "sourced"):
-                competitors[key] = supported
-            continue
-        if (
-            not name
-            or not re.search(r"(?<!\w)" + re.escape(name) + r"(?!\w)", page_evidence, re.IGNORECASE)
-            or competitor.website is not None
-            or competitor.target_market is not None
-            or competitor.category is not None
-            or competitor.business_overview is not None
-            or competitor.main_offerings
-            or competitor.sources
-            or competitor.strengths
-            or competitor.gaps
-        ):
-            raise LLMOutputError("unverified_competitor", "The analysis included an unsupported competitor claim.")
-        competitors.setdefault(key, competitor)
+        proposals.setdefault(key, []).append(competitor)
+        supported = ground_researched_competitor(competitor, research.sources)
+        if supported and (key not in competitors or supported.evidence_status in verified_statuses):
+            competitors[key] = supported
     for competitor in supported_competitors(research.sources):
         key = re.sub(r"[\W_]", "", competitor.name.casefold())
         existing = competitors.get(key)
         if key == brand_key:
             continue
-        if existing and existing.evidence_status == "sourced":
+        if existing and existing.evidence_status in verified_statuses:
             if existing.website and competitor.website and (
                 existing.website.host.removeprefix("www.") == competitor.website.host.removeprefix("www.")
             ):
                 existing.strengths = list(dict.fromkeys(existing.strengths + competitor.strengths))
                 existing.gaps = list(dict.fromkeys(existing.gaps + competitor.gaps))
+                existing.main_offerings = list(dict.fromkeys(existing.main_offerings + competitor.main_offerings))
                 existing.sources.extend(source for source in competitor.sources if source not in existing.sources)
             continue
         if existing:
             competitor.sources.extend(source for source in existing.sources if source not in competitor.sources)
         competitors[key] = competitor
+    for key, candidates in proposals.items():
+        for candidate in candidates:
+            comparison_entry = combine_competitor_reasoning(candidate, competitors.get(key), page_evidence)
+            if comparison_entry:
+                competitors[key] = comparison_entry
     comparison.competitors = list(competitors.values())
     comparison.research_status = research.status
+    opportunities = []
+    for item in comparison.opportunities:
+        prefix, separator, body = _compact(item).partition(":")
+        label = prefix.casefold() if separator else ""
+        if label in {"verified", "sourced", "inferred", "ai_suggestion"}:
+            text = body.strip()
+        else:
+            text = _compact(item)
+        if text:
+            label = "inferred" if label == "inferred" else "ai_suggestion"
+            opportunities.append(f"{label}: {text}")
+    comparison.opportunities = list(dict.fromkeys(opportunities))
     page_terms = {word.casefold() for word in re.findall(r"\b[a-zA-Z]{5,}\b", page_evidence)}
     for competitor in comparison.competitors:
+        if competitor.evidence_status not in verified_statuses:
+            continue
         relevant_gap = next((
             gap for gap in competitor.gaps
-            if len(page_terms & set(re.findall(r"\b[a-z]{5,}\b", gap.casefold()))) >= 2
+            if not gap.startswith(("inferred:", "ai_suggestion:"))
+            and len(page_terms & set(re.findall(r"\b[a-z]{5,}\b", gap.casefold()))) >= 2
         ), None)
         if relevant_gap:
             comparison.opportunities.append(
-                f"Suggestion: State whether your offering addresses this "
+                f"inferred: State whether your offering addresses this "
                 f"{competitor.name} limitation: “{relevant_gap}”"
             )
             break
+    if not comparison.opportunities and comparison.competitors:
+        lead = comparison.competitors[0]
+        comparison.opportunities.append(
+            f"ai_suggestion: Add a buyer guide for customers also evaluating {lead.name}. "
+            "Explain your setup process, support terms, and costs with published examples."
+        )
 
     grounded_services = {}
     missing_sources = invalid_sources = 0

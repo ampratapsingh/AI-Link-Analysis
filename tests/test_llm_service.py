@@ -56,6 +56,9 @@ async def test_sdk_parses_strict_output_and_logs_only_metrics(mock_openai, page,
         result = await generate_analysis(page, settings)
 
     analysis["analysis"]["competitor_analysis"]["research_status"] = "not_configured"
+    analysis["analysis"]["competitor_analysis"]["opportunities"] = [
+        "ai_suggestion: Explain response times on service pages"
+    ]
     assert result.model_dump(mode="json") == analysis
     body, = bodies
     assert body["model"] == "gpt-5.4-mini"
@@ -180,7 +183,6 @@ async def test_missing_required_section_fails_pydantic_validation(mock_openai, p
     [
         ("too_few_queries", "invalid_output"),
         ("duplicate_query", "invalid_queries"),
-        ("fabricated_competitor", "unverified_competitor"),
     ],
 )
 async def test_invalid_business_output_is_rejected(mock_openai, page, settings, analysis, problem, code, api_response):
@@ -188,25 +190,41 @@ async def test_invalid_business_output_is_rejected(mock_openai, page, settings, 
     queries = sections["target_search_queries"]
     if problem == "too_few_queries":
         queries.pop()
-    elif problem == "duplicate_query":
-        queries[1]["query"] = " Managed  IT "
     else:
-        sections["competitor_analysis"]["competitors"] = [
-            {
-                "name": "Invented competitor",
-                "website": None,
-                "main_offerings": [],
-                "target_market": None,
-                "strengths": [],
-                "gaps": [],
-                "evidence_status": "ai_suggestion",
-                "sources": [],
-            }
-        ]
+        queries[1]["query"] = " Managed  IT "
     mock_openai(lambda _: api_response(text=json.dumps(analysis)))
     with pytest.raises(LLMOutputError) as exc:
         await generate_analysis(page, settings)
     assert exc.value.code == code
+
+
+async def test_competitor_reasoning_without_search_is_labelled_and_forged_citations_are_removed(
+    mock_openai, page, settings, analysis, api_response
+):
+    comparison = analysis["analysis"]["competitor_analysis"]
+    comparison["competitors"] = [{
+        "name": "Example alternative",
+        "website": "https://unverified.example/",
+        "main_offerings": ["Managed cloud hosting"],
+        "strengths": ["verified: Lowest price", "inferred: May suit teams using hosted infrastructure"],
+        "gaps": ["ai_suggestion: Compare migration support before switching"],
+        "evidence_status": "inferred",
+        "sources": [{"url": "https://unverified.example/", "excerpt": "claimed evidence"}],
+    }]
+    comparison["opportunities"] = ["Explain migration assistance on your services page"]
+    mock_openai(lambda _: api_response(text=json.dumps(analysis)))
+
+    result = await generate_analysis(page, settings)
+
+    compared = result.analysis.competitor_analysis
+    assert compared.research_status == "not_configured"
+    competitor, = compared.competitors
+    assert competitor.evidence_status == "ai_suggestion"
+    assert competitor.website is None and competitor.sources == []
+    assert competitor.main_offerings == ["ai_suggestion: Managed cloud hosting"]
+    assert competitor.strengths == ["ai_suggestion: May suit teams using hosted infrastructure"]
+    assert competitor.gaps == ["ai_suggestion: Compare migration support before switching"]
+    assert compared.opportunities == ["ai_suggestion: Explain migration assistance on your services page"]
 
 
 async def test_prompt_keeps_injection_in_the_untrusted_user_message(mock_openai, page, settings, analysis, api_response):

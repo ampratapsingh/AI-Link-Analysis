@@ -38,7 +38,7 @@ class Competitor(BaseModel):
     target_market: str | None = None
     strengths: list[str]
     gaps: list[str]
-    evidence_status: Literal["sourced", "potential", "ai_suggestion"]
+    evidence_status: Literal["verified", "sourced", "potential", "inferred", "ai_suggestion"]
     sources: list[Evidence]
     business_overview: str | None = None
     category: str | None = None
