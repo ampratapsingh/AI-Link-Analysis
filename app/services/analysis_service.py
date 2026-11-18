@@ -46,8 +46,10 @@ you cannot verify, and state material evidence limitations in the brand summary.
   never full-site verification. Keep factual competitor claims inside competitor records.
   For each sourced competitor use the record's company_name and cite complete excerpts exactly
   with their source_url. Each business_overview, category, target_market, offering, strength,
-  or gap must be a verbatim cited excerpt about that company. Use gaps only for explicitly
-  documented limitations. Never infer a weakness from missing information.
+  or gap must be a verbatim cited excerpt about that company. Look for distinct, concrete
+  strengths and explicitly documented limitations among the supplied excerpts. Keep qualifiers
+  such as plan names and regions. Leave strengths or gaps empty when unsupported. Never infer
+  a weakness from missing information.
   When a snippet explicitly names a plausible competitor but evidence is too thin for factual
   comparisons, use potential and cite the complete excerpt naming it. Leave its other fields
   null or empty. When search research is absent, use ai_suggestion only for plausible leads

@@ -21,7 +21,13 @@ _GENERIC_TERMS = set(
     "the their this website what with world your".split()
 )
 _LIMITATION = re.compile(
-    r"\b(?:does not|do not|not available|unavailable|limited to|only available|only support)\b",
+    r"\b(?:(?:does not|do not) (?:offer|support|provide|include|ship|deliver|serve)"
+    r"|not available|unavailable|limited to|only available|available only|only supports?)\b",
+    re.I,
+)
+_EXPLICIT_STRENGTH = re.compile(
+    r"^(?:offers?|provides?|includes?) (?:(?:24/7|round-the-clock|around-the-clock) "
+    r"(?:(?:customer|technical|live) )?support|free (?:trials?|shipping|migration|support))\b",
     re.I,
 )
 _FIRST_PERSON_COMPANY = re.compile(r"^(?:we|our)\b", re.I)
@@ -257,28 +263,65 @@ def ground_researched_competitor(
     if not citations:
         return None
 
+    company = re.escape(_compact(competitor.name))
+    claim_pattern = re.compile(
+        rf"^(?:(?:{company}|we)\s+|(?:{company}['’]s|our)\s+"
+        r"(?:[\w-]+\s+){0,4}(?:plans?|services?|products?|platform|support|shipping|features?)\s+)"
+        r"(?:(?:is|are)\s+)?(.+)",
+        re.I,
+    )
     quotes = {item.excerpt for item in company_citations}
 
     def sourced(value: str | None) -> str | None:
         clean = _compact(value or "")
         return clean if clean in quotes else None
 
+    def is_gap(excerpt: str) -> bool:
+        match = claim_pattern.match(excerpt)
+        return bool(match and _LIMITATION.match(match.group(1)))
+
     facts = {
         "business_overview": sourced(competitor.business_overview),
         "category": sourced(competitor.category),
         "target_market": sourced(competitor.target_market),
         "main_offerings": list(dict.fromkeys(filter(None, map(sourced, competitor.main_offerings)))),
-        "strengths": list(dict.fromkeys(filter(None, map(sourced, competitor.strengths)))),
+        "strengths": [
+            quote for quote in dict.fromkeys(map(sourced, competitor.strengths))
+            if quote and claim_pattern.match(quote) and not is_gap(quote)
+        ],
         "gaps": [
             quote for quote in dict.fromkeys(map(sourced, competitor.gaps))
-            if quote and _LIMITATION.search(quote)
+            if quote and is_gap(quote)
         ],
     }
-    has_facts = any(facts.values()) and competitor.evidence_status == "sourced"
-    if not has_facts:
+    if competitor.evidence_status != "sourced":
         facts = {
             field: [] if isinstance(value, list) else None for field, value in facts.items()
         }
+
+    # Reuse only company-attributed sources the model already anchored to this competitor.
+    # Keep complete excerpts so qualifiers such as regions and plan names stay attached.
+    company_urls = {item.url for item in company_citations}
+    for source in sources:
+        if source.url not in company_urls or _name_key(source.company_name or "") != _name_key(competitor.name):
+            continue
+        for excerpt in source.excerpts:
+            match = claim_pattern.match(excerpt)
+            if match is None:
+                continue
+            claim = match.group(1)
+            if _LIMITATION.match(claim):
+                field = "gaps"
+            elif _EXPLICIT_STRENGTH.match(claim):
+                field = "strengths"
+            else:
+                continue
+            if excerpt not in facts[field]:
+                facts[field].append(excerpt)
+            evidence = Evidence(url=source.url, excerpt=excerpt)
+            if evidence not in citations:
+                citations.append(evidence)
+    has_facts = any(facts.values())
     return competitor.model_copy(update={
         **facts,
         "website": website if has_facts else None,

@@ -220,3 +220,70 @@ async def test_claims_require_complete_company_excerpts_and_matching_urls(
     potential = ground_researched_competitor(candidate, (directory,))
     assert potential is not None and potential.evidence_status == "potential"
     assert potential.website is None and potential.business_overview is None and potential.gaps == []
+
+
+@pytest.mark.parametrize("label", ["potential", "sourced"])
+async def test_comparison_uses_explicit_strengths_and_gaps_from_existing_company_snippets(
+    mock_search, business_page, search_settings, label
+):
+    strength = "Contoso provides 24/7 technical support on enterprise plans."
+    gap = "Our managed hosting plans are only available in Canada."
+    mock_search(lambda _: httpx.Response(200, json={
+        "results": [hit(snippet=f"{OVERVIEW} {strength} {gap}")],
+    }))
+    research = await discover_competitors(business_page, search_settings)
+    candidate = Competitor.model_validate({
+        "name": "Contoso",
+        "website": None,
+        "main_offerings": [],
+        "target_market": None,
+        "strengths": ["Contoso is the market leader."],
+        "gaps": ["Contoso has poor performance."],
+        "evidence_status": label,
+        "sources": [{"url": COMPANY_URL, "excerpt": OVERVIEW}],
+    })
+
+    grounded = ground_researched_competitor(candidate, research.sources)
+
+    assert grounded is not None and grounded.evidence_status == "sourced"
+    assert grounded.strengths == [strength]
+    assert grounded.gaps == [gap]
+    assert [(str(item.url), item.excerpt) for item in grounded.sources] == [
+        (COMPANY_URL, OVERVIEW), (COMPANY_URL, strength), (COMPANY_URL, gap),
+    ]
+
+
+async def test_ambiguous_mentions_do_not_turn_a_potential_competitor_into_a_verified_comparison(
+    mock_search, business_page, search_settings
+):
+    directory_url = "https://directory.example/cloud"
+    directory_quote = "Contoso provides 24/7 technical support for cloud hosting."
+    other_company = "Unlike Contoso, Fabrikam provides 24/7 technical support."
+    positive_policy = "Contoso does not charge setup fees."
+    mock_search(lambda _: httpx.Response(200, json={
+        "results": [
+            hit(snippet=f"{OVERVIEW} {other_company} {positive_policy}"),
+            hit(directory_url, "Cloud Hosting Directory", directory_quote),
+        ],
+    }))
+    research = await discover_competitors(business_page, search_settings)
+    candidate = Competitor.model_validate({
+        "name": "Contoso",
+        "website": None,
+        "main_offerings": [],
+        "target_market": None,
+        "strengths": [directory_quote, other_company],
+        "gaps": [positive_policy],
+        "evidence_status": "sourced",
+        "sources": [
+            {"url": directory_url, "excerpt": directory_quote},
+            {"url": COMPANY_URL, "excerpt": other_company},
+            {"url": COMPANY_URL, "excerpt": positive_policy},
+        ],
+    })
+
+    grounded = ground_researched_competitor(candidate, research.sources)
+
+    assert grounded is not None and grounded.evidence_status == "potential"
+    assert grounded.strengths == [] and grounded.gaps == []
+    assert grounded.sources == candidate.sources
