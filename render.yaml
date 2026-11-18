@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: ai-link-analysis
+    runtime: python
+    plan: free
+    autoDeployTrigger: "off"
+    buildCommand: python -m pip install -r requirements.txt
+    startCommand: python -m app.main
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.14.10"
+      - key: ENVIRONMENT
+        value: production
+      - key: HOST
+        value: "0.0.0.0"
+      - key: LLM_PROVIDER
+        value: anthropic
+      - key: ANTHROPIC_MODEL
+        value: claude-haiku-5-5
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: SEARCH_PROVIDER
+        value: "none"
