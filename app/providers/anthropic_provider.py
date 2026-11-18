@@ -5,6 +5,7 @@ from time import perf_counter
 
 from anthropic import (
     APIError,
+    APIStatusError,
     APITimeoutError,
     AsyncAnthropic,
     AuthenticationError,
@@ -23,6 +24,50 @@ from app.schemas import GeneratedAnalysis
 
 logger = logging.getLogger(__name__)
 _ANALYSIS_SCHEMA = transform_schema(GeneratedAnalysis)
+
+_ERROR_MESSAGES = {
+    "authentication_error": "Anthropic rejected authentication.",
+    "billing_error": "Anthropic rejected the request for a billing issue.",
+    "permission_error": "Anthropic denied access to the requested resource.",
+    "not_found_error": "Anthropic could not find the requested resource.",
+    "invalid_request_error": "Anthropic rejected the request parameters.",
+    "conflict_error": "Anthropic reported a resource conflict.",
+    "request_too_large": "Anthropic rejected the request size.",
+    "rate_limit_error": "Anthropic rate limited the request.",
+    "api_error": "Anthropic reported an internal error.",
+    "timeout_error": "Anthropic reported an upstream timeout.",
+    "overloaded_error": "Anthropic reported an overload.",
+}
+
+
+def _log_http_error(exc: APIStatusError) -> None:
+    # Upstream messages can echo arbitrary input. Classify their content without logging it.
+    body = exc.body
+    detail = body.get("error", body) if isinstance(body, dict) else None
+    error_type = detail.get("type") if isinstance(detail, dict) else None
+    if not isinstance(error_type, str) or error_type not in _ERROR_MESSAGES:
+        error_type = "unknown"
+    summary = _ERROR_MESSAGES.get(error_type, "Anthropic returned an unrecognized HTTP error.")
+    message = detail.get("message") if isinstance(detail, dict) else None
+    if isinstance(message, str):
+        message = message[:1024].lower()
+        if exc.status_code == 400:
+            if message.startswith("schema is too complex for compilation"):
+                summary = "Structured output schema is too complex to compile."
+            elif "output_config.format" in message or "schema" in message:
+                summary = "Anthropic reported a structured output schema error."
+            elif "max_tokens" in message:
+                summary = "Anthropic reported a max_tokens error."
+            elif "thinking" in message or "output_config.effort" in message:
+                summary = "Anthropic reported a thinking or effort configuration error."
+        elif exc.status_code == 404 and message.startswith("model:"):
+            summary = "The requested model was not found for this API client."
+    logger.warning(
+        "Anthropic HTTP error status=%d error_type=%s message=%s",
+        exc.status_code,
+        error_type,
+        summary,
+    )
 
 
 class AnthropicAnalysisProvider:
@@ -78,18 +123,21 @@ class AnthropicAnalysisProvider:
                     return GeneratedAnalysis.model_validate_json(text[0])
         except (TimeoutError, APITimeoutError):
             raise LLMProviderError("timeout", "The Claude analysis request timed out.") from None
-        except RateLimitError:
-            raise LLMProviderError("rate_limited", "Anthropic rate limited the analysis request.") from None
-        except (AuthenticationError, PermissionDeniedError):
-            raise LLMConfigurationError(
-                "invalid_credentials", "Check ANTHROPIC_API_KEY and the project's model permissions."
-            ) from None
-        except (BadRequestError, NotFoundError):
-            raise LLMConfigurationError(
-                "invalid_model_configuration",
-                "Anthropic rejected the request. Check ANTHROPIC_MODEL access, Structured Outputs "
-                "support, and LLM_MAX_OUTPUT_TOKENS.",
-            ) from None
+        except APIStatusError as exc:
+            _log_http_error(exc)
+            if isinstance(exc, RateLimitError):
+                raise LLMProviderError("rate_limited", "Anthropic rate limited the analysis request.") from None
+            if isinstance(exc, (AuthenticationError, PermissionDeniedError)):
+                raise LLMConfigurationError(
+                    "invalid_credentials", "Check ANTHROPIC_API_KEY and the project's model permissions."
+                ) from None
+            if isinstance(exc, (BadRequestError, NotFoundError)):
+                raise LLMConfigurationError(
+                    "invalid_model_configuration",
+                    "Anthropic rejected the request. Check ANTHROPIC_MODEL access, Structured Outputs "
+                    "support, and LLM_MAX_OUTPUT_TOKENS.",
+                ) from None
+            raise LLMProviderError("provider_error", "The Anthropic analysis request failed.") from None
         except APIError:
             raise LLMProviderError("provider_error", "The Anthropic analysis request failed.") from None
         except (ValidationError, ValueError, TypeError, AttributeError):

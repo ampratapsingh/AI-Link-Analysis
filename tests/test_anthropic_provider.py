@@ -84,16 +84,18 @@ async def test_timeout_covers_entire_anthropic_request(mock_anthropic):
 
 
 @pytest.mark.parametrize(
-    ("status", "error_type", "code", "attempts"),
+    ("status", "upstream_type", "error_type", "code", "attempts"),
     [
-        (429, LLMProviderError, "rate_limited", 2),
-        (529, LLMProviderError, "provider_error", 2),
-        (401, LLMConfigurationError, "invalid_credentials", 1),
-        (400, LLMConfigurationError, "invalid_model_configuration", 1),
+        (429, "rate_limit_error", LLMProviderError, "rate_limited", 2),
+        (529, "overloaded_error", LLMProviderError, "provider_error", 2),
+        (401, "authentication_error", LLMConfigurationError, "invalid_credentials", 1),
+        (403, "permission_error", LLMConfigurationError, "invalid_credentials", 1),
+        (400, "invalid_request_error", LLMConfigurationError, "invalid_model_configuration", 1),
+        (404, "not_found_error", LLMConfigurationError, "invalid_model_configuration", 1),
     ],
 )
 async def test_provider_errors_are_sanitized_and_retries_bounded(
-    provider, mock_anthropic, status, error_type, code, attempts
+    provider, mock_anthropic, status, upstream_type, error_type, code, attempts, caplog
 ):
     calls = []
 
@@ -101,7 +103,7 @@ async def test_provider_errors_are_sanitized_and_retries_bounded(
         calls.append(request)
         return httpx.Response(
             status, headers={"retry-after-ms": "1"},
-            json={"type": "error", "error": {"type": "fixture_error", "message": "sensitive fixture"}},
+            json={"type": "error", "error": {"type": upstream_type, "message": "sensitive fixture"}},
         )
 
     mock_anthropic(handler)
@@ -109,7 +111,58 @@ async def test_provider_errors_are_sanitized_and_retries_bounded(
         await provider.generate(system_prompt="Instructions", content="Evidence")
     assert error.value.code == code
     assert "sensitive fixture" not in str(error.value)
+    diagnostic = f"status={status} error_type={upstream_type}"
+    assert caplog.text.count(diagnostic) == 1
+    assert "sensitive fixture" not in caplog.text
     assert len(calls) == attempts
+
+
+@pytest.mark.parametrize(
+    ("status", "upstream_type", "message", "logged_type", "summary"),
+    [
+        (400, "invalid_request_error", "Schema is too complex for compilation",
+         "invalid_request_error", "Structured output schema is too complex to compile."),
+        (400, "invalid_request_error", "output_config.format.schema: invalid",
+         "invalid_request_error", "Anthropic reported a structured output schema error."),
+        (400, "invalid_request_error", "max_tokens: out of range",
+         "invalid_request_error", "Anthropic reported a max_tokens error."),
+        (400, "invalid_request_error", "output_config.effort is invalid",
+         "invalid_request_error", "Anthropic reported a thinking or effort configuration error."),
+        (404, "not_found_error", "model: claude-haiku-5-5",
+         "not_found_error", "The requested model was not found for this API client."),
+        (400, "fixture-key\nforged entry", "unrecognized message",
+         "unknown", "Anthropic returned an unrecognized HTTP error."),
+    ],
+)
+async def test_http_diagnostics_do_not_echo_response_or_request_data(
+    provider, mock_anthropic, caplog, status, upstream_type, message, logged_type, summary
+):
+    sensitive = "fixture-key\nPrivate website content\nPrivate system prompt\nforged entry"
+    mock_anthropic(lambda _: httpx.Response(status, json={
+        "type": "error",
+        "error": {"type": upstream_type, "message": f"{message}: {sensitive}"},
+    }))
+
+    with pytest.raises(LLMConfigurationError) as error:
+        await provider.generate(system_prompt="Private system prompt", content="Private website content")
+
+    assert error.value.code == "invalid_model_configuration"
+    assert f"status={status} error_type={logged_type} message={summary}" in caplog.text
+    assert summary not in str(error.value)
+    for value in sensitive.splitlines():
+        assert value not in caplog.text
+        assert value not in str(error.value)
+
+
+async def test_non_json_http_error_logs_status_without_logging_body(provider, mock_anthropic, caplog):
+    mock_anthropic(lambda _: httpx.Response(404, text="private upstream response"))
+
+    with pytest.raises(LLMConfigurationError) as error:
+        await provider.generate(system_prompt="Instructions", content="Evidence")
+
+    assert error.value.code == "invalid_model_configuration"
+    assert "status=404 error_type=unknown" in caplog.text
+    assert "private upstream response" not in caplog.text
 
 
 @pytest.mark.parametrize(
