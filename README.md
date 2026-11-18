@@ -1,26 +1,52 @@
 # AI-Powered Website Link Analysis API
 
-Submit a public website URL to FastAPI to extract business evidence and generate a brand profile, competitor analysis, five search queries, SEO recommendations, services, and target audiences.
+Turn a public website into a structured business and marketing report. FastAPI serves the API, Claude Haiku 5.5 generates the analysis, and Tavily provides optional competitor research.
 
-[Live demo](https://ai-link-analysis-k6ny.onrender.com/docs) · [API endpoint](https://ai-link-analysis-k6ny.onrender.com/link-analysis) · [Health check](https://ai-link-analysis-k6ny.onrender.com/health) · [Sanitized production logs](docs/DEMO_VERIFICATION.md)
+**[Try the live API in Swagger](https://ai-link-analysis-k6ny.onrender.com/docs)** · [Health check](https://ai-link-analysis-k6ny.onrender.com/health) · [Demo logs](docs/DEMO_VERIFICATION.md)
 
-## Local development
+[Quick start](#quick-start) · [API examples](#api-examples) · [Model comparison](#model-comparison-and-estimated-cost) · [Competitor research](#competitor-research) · [Deploy on Render](#deploy-on-render)
 
-Use Python 3.11 or newer.
+## What the API returns
+
+| Section | What you get |
+| --- | --- |
+| Competitor analysis | Brand positioning, cited competitor findings, and labeled inferences or suggestions |
+| Target search queries | Five distinct queries with suitable platforms, search intent, and audience |
+| SEO improvements | Keywords, a proposed title and meta description, and content ideas |
+| Top services | Up to five services, prioritizing those with supporting website excerpts |
+| Target audience | Likely customers, industries, needs, challenges, and marketing segments |
+
+## Quick start
+
+**1. Install dependencies.** Use Python 3.11 or newer.
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
 test -f .env || cp .env.example .env
+```
+
+**2. Configure analysis.** Set `ANTHROPIC_API_KEY` in your local `.env` for Claude requests. Add `SEARCH_API_KEY` if you want Tavily competitor research. Process environment variables take precedence over `.env` values.
+
+**3. Start the API.**
+
+```bash
 HOST=127.0.0.1 python -m app.main
 ```
 
-The server defaults to port 4000. Swagger UI is available at [localhost:4000/docs](http://localhost:4000/docs). Configuration comes from environment variables and the optional local `.env` file. The process environment takes precedence. The API starts without provider credentials.
+The server defaults to port 4000. Startup, health checks, and Swagger are available without provider credentials. [Open local Swagger UI](http://localhost:4000/docs)
 
-For Claude analysis, open `.env` in your editor and set `ANTHROPIC_API_KEY` privately. Set `LLM_PROVIDER=anthropic` and `ANTHROPIC_MODEL=claude-haiku-5-5` if your existing file contains an older provider choice. Restart the app after changing configuration.
+## API examples
 
-## Verify startup and request validation
+| Method | Route | Purpose |
+| --- | --- | --- |
+| `POST` | `/link-analysis` | Analyze a public website from a JSON body containing `url` |
+| `GET` | `/health` | Check that the API process is running |
+| `GET` | `/docs` | Open Swagger UI |
+| `GET` | `/openapi.json` | Download the API schema |
+
+### Verify startup and input validation
 
 ```bash
 curl -i http://localhost:4000/health
@@ -33,7 +59,7 @@ python -m pytest
 
 `GET /health` returns HTTP 200 with `{"status":"ok"}`. An invalid URL returns HTTP 422. Tests exercise the complete endpoint with mocked website, Anthropic, OpenAI, and Tavily connections.
 
-## Manual end-to-end check
+### Manual end-to-end check
 
 1. Set `ANTHROPIC_API_KEY` in your local `.env` or environment and restart the server. Use an Anthropic account with access to the configured model.
 2. Substitute the URL of a public business page below and run the command. A successful model request uses API credits.
@@ -45,7 +71,8 @@ curl -sS -i http://localhost:4000/link-analysis \
   -d '{"url":"https://your-business.example/services"}'
 ```
 
-### Example HTTP 200 response
+<details>
+<summary><strong>View the full example HTTP 200 response</strong></summary>
 
 Illustrative output from mocked website and model responses.
 
@@ -185,6 +212,8 @@ Illustrative output from mocked website and model responses.
 }
 ```
 
+</details>
+
 ### Error responses
 
 Errors use `{"success":false,"code":"...","detail":"..."}`.
@@ -256,7 +285,7 @@ Optional fields with unavailable values are omitted from successful responses. E
 
 **Recommendation:** Use Claude Haiku 5.5 for its estimated cost and the demonstrated five-section workflow. OpenAI GPT-5.4 mini is the configured alternative. At 6,000 input and 1,500 output tokens, estimated uncached generation costs are $0.00135 for Claude, $0.01125 for OpenAI, and $0.00555 for Gemini. Tavily credits are separate. The [full comparison](docs/LLM_COMPARISON.md) includes official sources, usage assumptions, and a repeatable benchmark procedure.
 
-## Optional competitor research
+## Competitor research
 
 Tavily receives up to two short searches based on the submitted site's title, headings, and service descriptions. The second uses competitor names found in explicit roundup lists when available and looks for product documentation, features, plan limits, and availability. The app skips it when the first search already supplies attributable strengths and gaps for three distinct companies within the evidence budget. Roundups can establish leads for the companies they name. A roundup publisher needs its own supporting evidence to qualify. [Tavily Search API](https://docs.tavily.com/documentation/api-reference/endpoint/search)
 
